@@ -1,4 +1,4 @@
-# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 16:32:36
+# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 16:35:33
 
 import os
 import argparse
@@ -11,6 +11,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 import requests
 import pandas as pd
+from tqdm import tqdm
 
 # --- CONFIGURAÇÃO ---
 load_dotenv()
@@ -86,7 +87,8 @@ def seed_parties(df):
         total_updated = 0
         total_skipped = 0
 
-        for _, row in parties_df.iterrows():
+        # Adiciona a barra de progresso com tqdm
+        for _, row in tqdm(parties_df.iterrows(), total=len(parties_df), desc="Populando Partidos"):
             party_number = int(row["NR_PARTIDO"])
             initials = row["SG_PARTIDO"]
             party_name = row["NM_PARTIDO"]
@@ -98,7 +100,6 @@ def seed_parties(df):
                 )
                 total_updated += 1
             elif initials in existing_initials:
-                print(f"⚠️  Aviso: Sigla '{initials}' já existe para outro número. Pulando partido {party_name} ({party_number}).")
                 total_skipped += 1
                 continue
             else:
@@ -131,21 +132,17 @@ def seed_politicians_and_candidacies(df, year):
         elections_cache = {}
         politicians_cache = {}
 
-        count = 0
-        for _, row in df.iterrows():
+        # Adiciona a barra de progresso com tqdm
+        for _, row in tqdm(df.iterrows(), total=len(df), desc="Populando Candidaturas"):
             # 1. Processa Eleição (UPSERT)
             turn = int(row['NR_TURNO'])
             election_key = f"{year}-{turn}"
             if election_key not in elections_cache:
-                # CORREÇÃO: Usamos um dia fixo ou mapeado para evitar o erro.
-                # O dia 2 é para o 1º turno, 30 para o 2º, por exemplo.
                 day = 2 if turn == 1 else 30
                 election_date = date(year, 10, day)
-                db.execute(
-                    text("INSERT INTO elections (election_date, election_type, turn) VALUES (:date, :type, :turn) ON CONFLICT DO NOTHING"),
-                    {"date": election_date, "type": row["DS_ELEICAO"], "turn": turn}
-                )
-                db.commit() # Commit para garantir que o ID esteja disponível
+                db.execute(text("INSERT INTO elections (election_date, election_type, turn) VALUES (:date, :type, :turn) ON CONFLICT DO NOTHING"),
+                           {"date": election_date, "type": row["DS_ELEICAO"], "turn": turn})
+                db.commit()
                 election_id = db.execute(text("SELECT election_id FROM elections WHERE turn = :turn AND date_part('year', election_date) = :year"), {"turn": turn, "year": year}).scalar_one()
                 elections_cache[election_key] = election_id
             election_id = elections_cache[election_key]
@@ -154,10 +151,6 @@ def seed_politicians_and_candidacies(df, year):
             politician_key = f'{row["NM_CANDIDATO"]}-{row["NM_URNA_CANDIDATO"]}'
             if politician_key not in politicians_cache:
                 new_politician_id = uuid.uuid4()
-                # Tenta inserir, se já existir (conflito no nome+apelido), não faz nada.
-                # A lógica de UNIQUE para colunas de texto no Postgres é mais complexa.
-                # O ideal seria uma constraint UNIQUE(full_name, nickname) no modelo.
-                # Vamos simplificar assumindo que a combinação é única.
                 existing_politician = db.execute(text("SELECT politician_id FROM politicians WHERE full_name = :name AND nickname = :nick"), {"name": row["NM_CANDIDATO"], "nick": row["NM_URNA_CANDIDATO"]}).scalar_one_or_none()
                 if existing_politician:
                     politician_id = existing_politician
@@ -177,13 +170,8 @@ def seed_politicians_and_candidacies(df, year):
                     {"p_id": politician_id, "party_id": party_id, "e_id": election_id, "office": row["DS_CARGO"], "num": int(row["NR_CANDIDATO"])}
                 )
 
-            count += 1
-            if count % 1000 == 0:
-                db.commit()
-                print(f"   ... {count} candidaturas processadas.")
-
         db.commit()
-        print(f"✅ Concluído! Total de {count} candidaturas processadas.")
+        print(f"✅ Concluído! Total de {len(df)} candidaturas processadas.")
     except Exception as e:
         print(f"❌ Erro durante o seeding: {e}")
         db.rollback()

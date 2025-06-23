@@ -1,4 +1,4 @@
-<!-- Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 16:32:36 -->
+<!-- Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 16:35:33 -->
 
 # PoliticaMente ETL
 
@@ -27,7 +27,7 @@ Este é um projeto da organização **politicamente-app**.
 
 2.  **Instale as dependências:**
     ```sh
-    pip install sqlalchemy psycopg2-binary python-dotenv requests pandas
+    pip install sqlalchemy psycopg2-binary python-dotenv requests pandas tqdm
     ```
 3.  **Crie e configure o arquivo `.env`:**
     * Crie um arquivo chamado `.env` na pasta raiz do projeto.
