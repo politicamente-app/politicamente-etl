@@ -1,4 +1,4 @@
-<!-- Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 13:34:25 -->
+<!-- Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 13:52:56 -->
 
 # PoliticaMente ETL
 
@@ -8,7 +8,7 @@ Este é um projeto da organização **politicamente-app**.
 
 ## Funcionalidades
 
-* **População de Partidos:** Carrega a lista oficial de partidos políticos registrados no Brasil.
+* **População de Partidos:** Extrai e carrega a lista oficial de partidos políticos registrados no Brasil diretamente do Portal de Dados Abertos do TSE.
 * **População de Eleições:** (Futuro) Carrega os dados históricos das eleições.
 * **População de Candidaturas:** (Futuro) Carrega a lista de todos os candidatos de cada eleição.
 
@@ -35,7 +35,7 @@ Este é um projeto da organização **politicamente-app**.
 
 3.  **Instale as dependências:**
     ```sh
-    pip install sqlalchemy psycopg2-binary python-dotenv
+    pip install sqlalchemy psycopg2-binary python-dotenv requests
     ```
 4.  **Crie e configure o arquivo `.env`:**
     * Crie um arquivo chamado `.env` na pasta raiz do projeto.
