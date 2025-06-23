@@ -1,4 +1,4 @@
-<!-- Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 14:09:29 -->
+<!-- Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 15:18:00 -->
 
 # PoliticaMente ETL
 
@@ -8,7 +8,7 @@ Este é um projeto da organização **politicamente-app**.
 
 ## Funcionalidades
 
-* **População de Partidos:** Extrai e carrega a lista oficial de partidos políticos registrados no Brasil diretamente do Portal de Dados Abertos do TSE.
+* **População de Partidos:** Extrai e carrega a lista oficial de partidos políticos registrados no Brasil diretamente da API de Dados Abertos do TSE.
 * **População de Eleições:** (Futuro) Carrega os dados históricos das eleições.
 * **População de Candidaturas:** (Futuro) Carrega a lista de todos os candidatos de cada eleição.
 

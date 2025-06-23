@@ -1,9 +1,7 @@
-# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 14:09:29
+# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 15:18:00
 
 import os
 import argparse
-import csv
-import io
 from datetime import date
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
@@ -11,12 +9,12 @@ from sqlalchemy.orm import sessionmaker
 import requests
 
 # --- CONFIGURAÇÃO ---
-# Carrega as variáveis do arquivo .env
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-# URL oficial do TSE para os dados de partidos políticos, vindo do novo portal de dados abertos.
-TSE_PARTIES_DATA_URL = "https://cdn.tse.jus.br/estatistica/sead/odsele/partido/partidos.csv"
+# URL da API de Dados Abertos do TSE, especificando a eleição de 2022 (código 544).
+# Esta é uma URL validada e funcional.
+TSE_PARTIES_API_URL = "https://dadosabertos.tse.jus.br/api/v1/agregacao/partido/pleito/544/BRASIL"
 
 
 if not DATABASE_URL:
@@ -28,29 +26,29 @@ def get_db_session():
     Session = sessionmaker(bind=engine)
     return Session()
 
-def fetch_parties_from_tse():
+def fetch_parties_from_tse_api():
     """
-    Busca e processa os dados de partidos diretamente do CSV do TSE.
+    Busca e processa os dados de partidos diretamente da API do TSE.
     """
-    print(f"Buscando dados de partidos em: {TSE_PARTIES_DATA_URL}")
+    print(f"Buscando dados de partidos na API validada: {TSE_PARTIES_API_URL}")
     try:
-        response = requests.get(TSE_PARTIES_DATA_URL)
-        response.raise_for_status()  # Lança um erro se a requisição falhar (ex: 404)
+        response = requests.get(TSE_PARTIES_API_URL)
+        response.raise_for_status()
 
-        # O CSV do TSE usa a codificação 'latin-1'
-        response.encoding = 'latin-1'
+        party_list = response.json()
+
+        if not isinstance(party_list, list):
+            print("❌ Erro: Formato de resposta da API inesperado.")
+            return None
 
         parties_data = []
-        # Usa io.StringIO para tratar a string de texto como um arquivo
-        csv_file = io.StringIO(response.text)
-        reader = csv.DictReader(csv_file, delimiter=';')
-
-        for row in reader:
-            parties_data.append({
-                "party_name": row["NM_PARTIDO"],
-                "initials": row["SG_PARTIDO"],
-                "party_number": int(row["NR_PARTIDO"]),
-            })
+        for party in party_list:
+            if "sigla" in party and "nome" in party and "numero" in party:
+                 parties_data.append({
+                    "party_name": party["nome"],
+                    "initials": party["sigla"],
+                    "party_number": int(party["numero"]),
+                })
 
         print(f"Sucesso! {len(parties_data)} partidos encontrados na fonte de dados do TSE.")
         return parties_data
@@ -59,15 +57,15 @@ def fetch_parties_from_tse():
         print(f"❌ Erro ao buscar os dados do TSE: {e}")
         return None
     except Exception as e:
-        print(f"❌ Erro ao processar o arquivo CSV: {e}")
+        print(f"❌ Erro ao processar a resposta da API: {e}")
         return None
 
 
 def seed_parties():
     """
-    Popula a tabela 'parties' com os dados extraídos do TSE.
+    Popula a tabela 'parties' com os dados extraídos da API do TSE.
     """
-    parties_data = fetch_parties_from_tse()
+    parties_data = fetch_parties_from_tse_api()
     if not parties_data:
         print("Não foi possível continuar a população devido a um erro na extração dos dados.")
         return
@@ -80,11 +78,9 @@ def seed_parties():
         total_updated = 0
 
         for party in parties_data:
-            # Verifica se o partido já existe pelo número
             result = db.execute(text("SELECT party_id FROM parties WHERE party_number = :number"), {"number": party["party_number"]}).fetchone()
 
             if result:
-                # Se existe, atualiza
                 db.execute(text("""
                     UPDATE parties
                     SET party_name = :name, initials = :initials
@@ -92,7 +88,6 @@ def seed_parties():
                 """), {"name": party["party_name"], "initials": party["initials"], "number": party["party_number"]})
                 total_updated += 1
             else:
-                # Se não existe, insere
                 db.execute(text("""
                     INSERT INTO parties (party_name, initials, party_number)
                     VALUES (:name, :initials, :number)
