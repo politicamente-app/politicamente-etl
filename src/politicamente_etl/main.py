@@ -1,4 +1,4 @@
-# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 16:41:20
+# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 16:44:23
 
 import os
 import argparse
@@ -129,23 +129,30 @@ def process_chunk(chunk, year, parties_cache):
     try:
         for _, row in chunk.iterrows():
             turn = int(row['NR_TURNO'])
-            election_key = f"{year}-{turn}"
+            election_key = f"{year}-{turn}-{row['DS_ELEICAO']}" # Chave mais específica
             if election_key not in elections_cache:
                 day = 2 if turn == 1 else 30
                 election_date = date(year, 10, day)
-                db.execute(text("INSERT INTO elections (election_date, election_type, turn) VALUES (:date, :type, :turn) ON CONFLICT DO NOTHING"),
-                           {"date": election_date, "type": row["DS_ELEICAO"], "turn": turn})
-                db.commit() # Commit para garantir que o ID esteja disponível para a query seguinte
-                election_id = db.execute(text("SELECT election_id FROM elections WHERE turn = :turn AND date_part('year', election_date) = :year"), {"turn": turn, "year": year}).scalar_one_or_none()
-                if election_id: elections_cache[election_key] = election_id
+                # Usamos ON CONFLICT para inserir a eleição de forma segura
+                db.execute(
+                    text("INSERT INTO elections (election_date, election_type, turn) VALUES (:date, :type, :turn) ON CONFLICT DO NOTHING"),
+                    {"date": election_date, "type": row["DS_ELEICAO"], "turn": turn}
+                )
+                db.commit()
+                # CORREÇÃO: Busca a eleição com todos os campos para garantir unicidade
+                election_result = db.execute(
+                    text("SELECT election_id FROM elections WHERE turn = :turn AND date_part('year', election_date) = :year AND election_type = :type"),
+                    {"turn": turn, "year": year, "type": row["DS_ELEICAO"]}
+                ).first()
+                if election_result:
+                    elections_cache[election_key] = election_result[0]
             election_id = elections_cache.get(election_key)
 
             politician_key = f'{row["NM_CANDIDATO"]}-{row["NM_URNA_CANDIDATO"]}'
             if politician_key not in politicians_cache:
-                # CORREÇÃO: Usamos .first() para pegar o primeiro resultado em caso de duplicatas, evitando o erro.
-                existing_politician_result = db.execute(text("SELECT politician_id FROM politicians WHERE full_name = :name AND nickname = :nick"), {"name": row["NM_CANDIDATO"], "nick": row["NM_URNA_CANDIDATO"]}).first()
-                if existing_politician_result:
-                    politician_id = existing_politician_result[0]
+                existing_politician = db.execute(text("SELECT politician_id FROM politicians WHERE full_name = :name AND nickname = :nick"), {"name": row["NM_CANDIDATO"], "nick": row["NM_URNA_CANDIDATO"]}).first()
+                if existing_politician:
+                    politician_id = existing_politician[0]
                 else:
                     politician_id = db.execute(
                         text("INSERT INTO politicians (politician_id, full_name, nickname) VALUES (:id, :name, :nick) RETURNING politician_id"),
@@ -181,13 +188,16 @@ def seed_politicians_and_candidacies(df, year):
     db.close()
 
     # Divide o DataFrame em pedaços para os workers
-    chunks = [df.iloc[i:i + len(df) // MAX_WORKERS] for i in range(0, len(df), len(df) // MAX_WORKERS)]
+    chunk_size = len(df) // MAX_WORKERS
+    chunks = [df.iloc[i:i + chunk_size] for i in range(0, len(df), chunk_size)]
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        # Envolve o as_completed com tqdm para a barra de progresso
         futures = [executor.submit(process_chunk, chunk, year, parties_cache) for chunk in chunks]
         for future in tqdm(as_completed(futures), total=len(futures), desc="Processando Lotes"):
-            future.result() # Apenas para capturar exceções, se houver
+            try:
+                future.result()
+            except Exception as e:
+                print(f"Um erro ocorreu em um worker: {e}")
 
     print(f"✅ Concluído! Total de {len(df)} candidaturas processadas.")
 
