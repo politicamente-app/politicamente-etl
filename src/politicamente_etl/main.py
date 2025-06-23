@@ -1,4 +1,4 @@
-# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 16:46:12
+# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 16:50:00
 
 import os
 import argparse
@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-MAX_WORKERS = int(os.getenv("MAX_WORKERS", 4)) # Padrão de 4 workers se não for definido
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", 4))
 TSE_DATA_BASE_URL = "https://cdn.tse.jus.br/estatistica/sead/odsele/consulta_cand"
 DATA_DIR = "data"
 
@@ -85,10 +85,6 @@ def seed_parties(df):
         existing_numbers = {p.party_number for p in existing_parties_raw}
         existing_initials = {p.initials for p in existing_parties_raw}
 
-        total_inserted = 0
-        total_updated = 0
-        total_skipped = 0
-
         for _, row in tqdm(parties_df.iterrows(), total=len(parties_df), desc="Populando Partidos"):
             party_number = int(row["NR_PARTIDO"])
             initials = row["SG_PARTIDO"]
@@ -99,9 +95,7 @@ def seed_parties(df):
                     text("UPDATE parties SET initials = :init, party_name = :name WHERE party_number = :num"),
                     {"num": party_number, "init": initials, "name": party_name}
                 )
-                total_updated += 1
             elif initials in existing_initials:
-                total_skipped += 1
                 continue
             else:
                 db.execute(
@@ -110,10 +104,9 @@ def seed_parties(df):
                 )
                 existing_numbers.add(party_number)
                 existing_initials.add(initials)
-                total_inserted += 1
 
         db.commit()
-        print(f"✅ Concluído! {total_inserted} partidos inseridos, {total_updated} partidos atualizados, {total_skipped} pulados por conflito de sigla.")
+        print(f"✅ População de partidos concluída.")
     except Exception as e:
         print(f"❌ Erro ao popular a tabela de partidos: {e}")
         db.rollback()
@@ -123,27 +116,23 @@ def seed_parties(df):
 def process_chunk(chunk, year, parties_cache):
     """Processa um 'pedaço' do DataFrame para inserir dados."""
     db = get_db_session()
-    elections_cache = {}
-    politicians_cache = {}
-
     try:
+        elections_cache = {}
+        politicians_cache = {}
+
         for _, row in chunk.iterrows():
             turn = int(row['NR_TURNO'])
-            election_key = f"{year}-{turn}-{row['DS_ELEICAO']}" # Chave mais específica
+            election_key = f"{year}-{turn}-{row['DS_ELEICAO']}"
             if election_key not in elections_cache:
                 day = 2 if turn == 1 else 30
                 election_date = date(year, 10, day)
-                # Usamos ON CONFLICT para inserir a eleição de forma segura
                 db.execute(
                     text("INSERT INTO elections (election_date, election_type, turn) VALUES (:date, :type, :turn) ON CONFLICT DO NOTHING"),
                     {"date": election_date, "type": row["DS_ELEICAO"], "turn": turn}
                 )
                 db.commit()
-                # CORREÇÃO: Busca a eleição com todos os campos para garantir unicidade
-                election_result = db.execute(
-                    text("SELECT election_id FROM elections WHERE turn = :turn AND date_part('year', election_date) = :year AND election_type = :type"),
-                    {"turn": turn, "year": year, "type": row["DS_ELEICAO"]}
-                ).first()
+                election_result = db.execute(text("SELECT election_id FROM elections WHERE turn = :turn AND date_part('year', election_date) = :year AND election_type = :type"),
+                                             {"turn": turn, "year": year, "type": row["DS_ELEICAO"]}).first()
                 if election_result:
                     elections_cache[election_key] = election_result[0]
             election_id = elections_cache.get(election_key)
@@ -154,15 +143,19 @@ def process_chunk(chunk, year, parties_cache):
                 if existing_politician:
                     politician_id = existing_politician[0]
                 else:
-                    politician_id = db.execute(
-                        text("INSERT INTO politicians (politician_id, full_name, nickname) VALUES (:id, :name, :nick) RETURNING politician_id"),
+                    db.execute(
+                        text("INSERT INTO politicians (politician_id, full_name, nickname) VALUES (:id, :name, :nick) ON CONFLICT (full_name, nickname) DO NOTHING"),
                         {"id": uuid.uuid4(), "name": row["NM_CANDIDATO"], "nick": row["NM_URNA_CANDIDATO"]}
-                    ).scalar_one()
-                politicians_cache[politician_key] = politician_id
-            politician_id = politicians_cache[politician_key]
+                    )
+                    db.commit()
+                    politician_id = db.execute(text("SELECT politician_id FROM politicians WHERE full_name = :name AND nickname = :nick"), {"name": row["NM_CANDIDATO"], "nick": row["NM_URNA_CANDIDATO"]}).scalar()
+
+                if politician_id: politicians_cache[politician_key] = politician_id
+            politician_id = politicians_cache.get(politician_key)
 
             party_id = parties_cache.get(int(row["NR_PARTIDO"]))
-            if party_id and election_id:
+
+            if party_id and election_id and politician_id:
                 db.execute(
                     text("INSERT INTO candidacies (politician_id, party_id, election_id, office, electoral_number) VALUES (:p_id, :party_id, :e_id, :office, :num) ON CONFLICT DO NOTHING"),
                     {"p_id": politician_id, "party_id": party_id, "e_id": election_id, "office": row["DS_CARGO"], "num": int(row["NR_CANDIDATO"])}
@@ -170,7 +163,8 @@ def process_chunk(chunk, year, parties_cache):
         db.commit()
     except Exception as e:
         db.rollback()
-        print(f"❌ Erro no worker: {e}")
+        # Propaga a exceção para que o executor principal possa capturá-la
+        raise e
     finally:
         db.close()
 
@@ -178,7 +172,6 @@ def process_chunk(chunk, year, parties_cache):
 def seed_politicians_and_candidacies(df, year):
     """Popula as tabelas de politicos e candidaturas usando processamento paralelo."""
     if df is None:
-        print("DataFrame não fornecido. Abortando o seeding de candidaturas.")
         return
 
     print(f"🚀 Iniciando a população de políticos e candidaturas com até {MAX_WORKERS} workers paralelos...")
@@ -187,19 +180,20 @@ def seed_politicians_and_candidacies(df, year):
     parties_cache = {row.party_number: row.party_id for row in db.execute(text("SELECT party_id, party_number FROM parties")).all()}
     db.close()
 
-    # Divide o DataFrame em pedaços para os workers
-    chunk_size = len(df) // MAX_WORKERS
+    chunk_size = len(df) // MAX_WORKERS if len(df) > MAX_WORKERS else len(df)
     chunks = [df.iloc[i:i + chunk_size] for i in range(0, len(df), chunk_size)]
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = [executor.submit(process_chunk, chunk, year, parties_cache) for chunk in chunks]
+        futures = {executor.submit(process_chunk, chunk, year, parties_cache): i for i, chunk in enumerate(chunks)}
+
         for future in tqdm(as_completed(futures), total=len(futures), desc="Processando Lotes"):
+            chunk_index = futures[future]
             try:
                 future.result()
             except Exception as e:
-                print(f"Um erro ocorreu em um worker: {e}")
+                print(f"❌ Erro no worker processando o lote {chunk_index}: {e}")
 
-    print(f"✅ Concluído! Total de {len(df)} candidaturas processadas.")
+    print(f"✅ Concluído! Processamento de {len(df)} candidaturas finalizado.")
 
 
 def main():
