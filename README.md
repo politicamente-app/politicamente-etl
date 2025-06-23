@@ -1,4 +1,4 @@
-<!-- Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 16:10:59 -->
+<!-- Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 16:22:07 -->
 
 # PoliticaMente ETL
 
@@ -8,7 +8,7 @@ Este é um projeto da organização **politicamente-app**.
 
 ## Funcionalidades
 
-* **População de Partidos, Políticos e Candidaturas:** Extrai e carrega os dados de um arquivo CSV oficial de candidaturas do TSE de forma automatizada.
+* **População de Partidos, Políticos e Candidaturas:** Extrai e carrega os dados de arquivos CSV oficiais de candidaturas do TSE.
 
 ## Instalação e Uso
 
@@ -27,7 +27,7 @@ Este é um projeto da organização **politicamente-app**.
 
 2.  **Instale as dependências:**
     ```sh
-    pip install sqlalchemy psycopg2-binary python-dotenv requests
+    pip install sqlalchemy psycopg2-binary python-dotenv requests pandas
     ```
 3.  **Crie e configure o arquivo `.env`:**
     * Crie um arquivo chamado `.env` na pasta raiz do projeto.
@@ -38,14 +38,18 @@ Este é um projeto da organização **politicamente-app**.
 
 ### 2. Como Executar o Script
 
-O script agora pode inferir o ano da eleição mais recente ou aceitar um ano específico.
+O script agora tem comandos específicos para cada tarefa.
 
-* **Para popular o banco com os dados da eleição mais recente (Recomendado):**
+* **Para popular apenas os partidos de uma eleição:**
     ```sh
-    python src/politicamente_etl/main.py seed_election_data
+    python src/politicamente_etl/main.py seed_parties --year 2022
     ```
 
-* **Para popular o banco com os dados de um ano específico:**
+* **Para popular os políticos e candidaturas (sem os partidos):**
     ```sh
-    python src/politicamente_etl/main.py seed_election_data --year 2022
+    python src/politicamente_etl/main.py seed_candidacies --year 2022
+    ```
+* **Para forçar um novo download do arquivo do TSE, mesmo que ele já exista localmente:**
+    ```sh
+    python src/politicamente_etl/main.py seed_parties --year 2022 --force-download
     ```
