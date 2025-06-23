@@ -1,4 +1,4 @@
-# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 16:57:32
+# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 17:28:13
 
 import os
 import argparse
@@ -113,14 +113,14 @@ def seed_parties(df):
     finally:
         db.close()
 
-def process_chunk(chunk, year, parties_cache):
-    """Processa um 'pedaço' do DataFrame para inserir dados."""
+def process_chunk(chunk, year, parties_cache, pbar_position):
+    """Processa um 'pedaço' do DataFrame para inserir dados, com sua própria barra de progresso."""
     db = get_db_session()
     try:
         elections_cache = {}
         politicians_cache = {}
 
-        for _, row in chunk.iterrows():
+        for _, row in tqdm(chunk.iterrows(), total=len(chunk), desc=f"Worker {pbar_position}", position=pbar_position, leave=False):
             turn = int(row['NR_TURNO'])
             election_key = f"{year}-{turn}-{row['DS_ELEICAO']}"
             if election_key not in elections_cache:
@@ -143,18 +143,14 @@ def process_chunk(chunk, year, parties_cache):
                 if existing_politician:
                     politician_id = existing_politician[0]
                 else:
-                    db.execute(
-                        text("INSERT INTO politicians (politician_id, full_name, nickname) VALUES (:id, :name, :nick) ON CONFLICT (full_name, nickname) DO NOTHING"),
+                    politician_id = db.execute(
+                        text("INSERT INTO politicians (politician_id, full_name, nickname) VALUES (:id, :name, :nick) RETURNING politician_id"),
                         {"id": uuid.uuid4(), "name": row["NM_CANDIDATO"], "nick": row["NM_URNA_CANDIDATO"]}
-                    )
-                    db.commit()
-                    politician_id = db.execute(text("SELECT politician_id FROM politicians WHERE full_name = :name AND nickname = :nick"), {"name": row["NM_CANDIDATO"], "nick": row["NM_URNA_CANDIDATO"]}).scalar()
-
-                if politician_id: politicians_cache[politician_key] = politician_id
+                    ).scalar_one()
+                politicians_cache[politician_key] = politician_id
             politician_id = politicians_cache.get(politician_key)
 
             party_id = parties_cache.get(int(row["NR_PARTIDO"]))
-
             if party_id and election_id and politician_id:
                 db.execute(
                     text("INSERT INTO candidacies (politician_id, party_id, election_id, office, electoral_number) VALUES (:p_id, :party_id, :e_id, :office, :num) ON CONFLICT DO NOTHING"),
@@ -163,11 +159,9 @@ def process_chunk(chunk, year, parties_cache):
         db.commit()
     except Exception as e:
         db.rollback()
-        # Propaga a exceção para que o executor principal possa capturá-la
         raise e
     finally:
         db.close()
-
 
 def seed_politicians_and_candidacies(df, year):
     """Popula as tabelas de politicos e candidaturas usando processamento paralelo."""
@@ -184,14 +178,16 @@ def seed_politicians_and_candidacies(df, year):
     chunks = [df.iloc[i:i + chunk_size] for i in range(0, len(df), chunk_size)]
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(process_chunk, chunk, year, parties_cache): i for i, chunk in enumerate(chunks)}
+        # A barra de progresso geral agora rastreia a conclusão dos lotes (chunks)
+        with tqdm(total=len(chunks), desc="Progresso Geral dos Lotes", position=0) as pbar:
+            futures = {executor.submit(process_chunk, chunk, year, parties_cache, i + 1): i for i, chunk in enumerate(chunks)}
 
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Processando Lotes"):
-            chunk_index = futures[future]
-            try:
-                future.result()
-            except Exception as e:
-                print(f"❌ Erro no worker processando o lote {chunk_index}: {e}")
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    print(f"❌ Um erro ocorreu em um dos workers: {e}")
+                pbar.update(1) # Atualiza a barra de progresso geral quando um lote termina
 
     print(f"✅ Concluído! Processamento de {len(df)} candidaturas finalizado.")
 
