@@ -1,0 +1,22 @@
+# Ambientes virtuais
+venv/
+.venv/
+env/
+
+# Arquivos de cache do Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Arquivos de IDE
+.vscode/
+
+# Arquivos de ambiente (SEGURANÇA!)
+.env
+
+# Arquivos extras
+*.sql
+*.txt
+
+# --- 
+# Arquivo atualizado pelo DomTech Forger em 2025-06-23 13:34:25
