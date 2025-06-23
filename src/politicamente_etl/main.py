@@ -1,4 +1,4 @@
-# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 17:57:22
+# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 18:19:47
 
 import os
 import argparse
@@ -9,7 +9,6 @@ from datetime import date
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.exc import IntegrityError
 import requests
 import pandas as pd
 from tqdm import tqdm
@@ -105,7 +104,11 @@ def seed_politicians(df):
                 "nick": row["NM_URNA_CANDIDATO"]
             })
 
-        print(f"Inserindo {len(politicians_to_insert)} políticos no banco de dados (pode levar um momento)...")
+        if not politicians_to_insert:
+            print("Nenhum novo político para inserir.")
+            return
+
+        print(f"Inserindo {len(politicians_to_insert)} políticos únicos no banco de dados...")
         # Inserção em lote
         db.execute(
             text("INSERT INTO politicians (politician_id, full_name, nickname) VALUES (:id, :name, :nick) ON CONFLICT (full_name, nickname) DO NOTHING"),
@@ -151,7 +154,6 @@ def process_candidacies_chunk(chunk, caches):
     finally:
         db.close()
 
-
 def seed_candidacies(df, year):
     """Popula as tabelas de eleições e candidaturas."""
     if df is None: return
@@ -165,31 +167,31 @@ def seed_candidacies(df, year):
 
         # Cria as eleições primeiro
         elections_df = df[['NR_ANO_ELEICAO', 'NR_TURNO', 'DS_ELEICAO']].drop_duplicates()
-        for _, row in elections_df.iterrows():
+        for _, row in tqdm(elections_df.iterrows(), total=len(elections_df), desc="Criando Eleições"):
             turn = int(row['NR_TURNO'])
             day = 2 if turn == 1 else 30
             election_date = date(int(row['NR_ANO_ELEICAO']), 10, day)
             db.execute(text("INSERT INTO elections (election_date, election_type, turn) VALUES (:date, :type, :turn) ON CONFLICT DO NOTHING"),
                        {"date": election_date, "type": row["DS_ELEICAO"], "turn": turn})
         db.commit()
-        elections_cache = {f"{e.date_part}-{e.turn}-{e.election_type}": e.election_id for e in db.execute(text("SELECT election_id, date_part('year', election_date) as date_part, turn, election_type FROM elections")).all()}
+        elections_cache = {f"{int(e.date_part)}-{e.turn}-{e.election_type}": e.election_id for e in db.execute(text("SELECT election_id, date_part('year', election_date) as date_part, turn, election_type FROM elections")).all()}
 
-        chunks = [df.iloc[i:i + 10000] for i in range(0, len(df), 10000)]
+        # Processamento paralelo de candidaturas
+        chunks = [df.iloc[i:i + 5000] for i in range(0, len(df), 5000)] # Lotes de 5000
         caches = {'parties': parties_cache, 'politicians': politicians_cache, 'elections': elections_cache}
 
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            with tqdm(total=len(df), desc="Progresso Geral") as pbar:
+            with tqdm(total=len(df), desc="Processando Candidaturas") as pbar:
                 futures = [executor.submit(process_candidacies_chunk, chunk, caches) for chunk in chunks]
                 for future in as_completed(futures):
                     processed_count = future.result()
                     pbar.update(processed_count)
 
-        print(f"✅ Concluído! Processamento de {len(df)} candidaturas finalizado.")
+        print(f"✅ Concluído! Processamento de candidaturas finalizado.")
     except Exception as e:
         print(f"❌ Erro durante o seeding de candidaturas: {e}")
     finally:
         db.close()
-
 
 def main():
     """Função principal para analisar os argumentos e chamar a tarefa correta."""
@@ -197,19 +199,18 @@ def main():
 
     subparsers = parser.add_subparsers(dest="command", required=True, help="Comando a ser executado")
 
-    parser_parties = subparsers.add_parser("seed_parties", help="Popula APENAS a tabela de partidos.")
-    parser_parties.add_argument("--year", type=int, default=date.today().year, help="Ano da eleição.")
-    parser_parties.add_argument("--force-download", action='store_true')
+    # Parser base para opções comuns
+    base_parser = argparse.ArgumentParser(add_help=False)
+    base_parser.add_argument("--year", type=int, default=date.today().year, help="Ano da eleição.")
+    base_parser.add_argument("--force-download", action='store_true')
+
+    parser_parties = subparsers.add_parser("seed_parties", help="Popula APENAS a tabela de partidos.", parents=[base_parser])
     parser_parties.set_defaults(func=lambda args: seed_parties(get_election_data_as_dataframe(args.year, args.force_download)))
 
-    parser_politicians = subparsers.add_parser("seed_politicians", help="Popula APENAS a tabela de políticos.")
-    parser_politicians.add_argument("--year", type=int, default=date.today().year, help="Ano da eleição.")
-    parser_politicians.add_argument("--force-download", action='store_true')
+    parser_politicians = subparsers.add_parser("seed_politicians", help="Popula APENAS a tabela de políticos.", parents=[base_parser])
     parser_politicians.set_defaults(func=lambda args: seed_politicians(get_election_data_as_dataframe(args.year, args.force_download)))
 
-    parser_candidacies = subparsers.add_parser("seed_candidacies", help="Popula a tabela de candidaturas.")
-    parser_candidacies.add_argument("--year", type=int, default=date.today().year, help="Ano da eleição.")
-    parser_candidacies.add_argument("--force-download", action='store_true')
+    parser_candidacies = subparsers.add_parser("seed_candidacies", help="Popula a tabela de candidaturas (requer partidos e políticos já populados).", parents=[base_parser])
     parser_candidacies.set_defaults(func=lambda args: seed_candidacies(get_election_data_as_dataframe(args.year, args.force_download), args.year))
 
     args = parser.parse_args()
