@@ -14,9 +14,13 @@ __pycache__/
 # Arquivos de ambiente (SEGURANÇA!)
 .env
 
+# Arquivos de dados (para não versionar dados brutos grandes)
+data/*.csv
+data/*.zip
+
 # Arquivos extras
 *.sql
 *.txt
 
 # --- 
-# Arquivo atualizado pelo DomTech Forger em 2025-06-23 15:18:00
+# Arquivo atualizado pelo DomTech Forger em 2025-06-23 16:10:59

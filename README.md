@@ -1,4 +1,4 @@
-<!-- Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 15:18:00 -->
+<!-- Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 16:10:59 -->
 
 # PoliticaMente ETL
 
@@ -8,9 +8,7 @@ Este é um projeto da organização **politicamente-app**.
 
 ## Funcionalidades
 
-* **População de Partidos:** Extrai e carrega a lista oficial de partidos políticos registrados no Brasil diretamente da API de Dados Abertos do TSE.
-* **População de Eleições:** (Futuro) Carrega os dados históricos das eleições.
-* **População de Candidaturas:** (Futuro) Carrega a lista de todos os candidatos de cada eleição.
+* **População de Partidos, Políticos e Candidaturas:** Extrai e carrega os dados de um arquivo CSV oficial de candidaturas do TSE de forma automatizada.
 
 ## Instalação e Uso
 
@@ -19,40 +17,35 @@ Este é um projeto da organização **politicamente-app**.
 * Python 3.9+
 * Um ambiente virtual Python (`venv`).
 
-### Instalação
+### 1. Instalação do Script
 
-1.  **Clone o repositório:**
-    ```sh
-    git clone [https://github.com/politicamente-app/politicamente-etl.git](https://github.com/politicamente-app/politicamente-etl.git)
-    cd politicamente-etl
-    ```
-
-2.  **Crie e ative um ambiente virtual:**
+1.  **Crie e ative um ambiente virtual:**
     ```sh
     python -m venv venv
     source venv/bin/activate
     ```
 
-3.  **Instale as dependências:**
+2.  **Instale as dependências:**
     ```sh
     pip install sqlalchemy psycopg2-binary python-dotenv requests
     ```
-4.  **Crie e configure o arquivo `.env`:**
+3.  **Crie e configure o arquivo `.env`:**
     * Crie um arquivo chamado `.env` na pasta raiz do projeto.
-    * Dentro dele, adicione a string de conexão do seu banco de dados (a mesma usada pela API):
+    * Dentro dele, adicione a string de conexão do seu banco de dados:
         ```
         DATABASE_URL="sua_string_de_conexao_aqui"
         ```
 
-### Como Executar o Script
+### 2. Como Executar o Script
 
-O script é modular. Você especifica qual tarefa (ou "seeder") deseja executar através de um argumento na linha de comando.
+O script agora pode inferir o ano da eleição mais recente ou aceitar um ano específico.
 
-* **Para popular a tabela de partidos:**
+* **Para popular o banco com os dados da eleição mais recente (Recomendado):**
     ```sh
-    python src/politicamente_etl/main.py seed_parties
+    python src/politicamente_etl/main.py seed_election_data
     ```
-* **Para ver todas as opções disponíveis:**
+
+* **Para popular o banco com os dados de um ano específico:**
     ```sh
-    python src/politicamente_etl/main.py --help
+    python src/politicamente_etl/main.py seed_election_data --year 2022
     ```

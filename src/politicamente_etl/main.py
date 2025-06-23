@@ -1,7 +1,10 @@
-# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 15:18:00
+# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 16:11:00
 
 import os
 import argparse
+import csv
+import io
+import zipfile
 from datetime import date
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
@@ -12,10 +15,8 @@ import requests
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-# URL da API de Dados Abertos do TSE, especificando a eleição de 2022 (código 544).
-# Esta é uma URL validada e funcional.
-TSE_PARTIES_API_URL = "https://dadosabertos.tse.jus.br/api/v1/agregacao/partido/pleito/544/BRASIL"
-
+TSE_DATA_BASE_URL = "https://cdn.tse.jus.br/estatistica/sead/odsele/consulta_cand"
+SEARCH_LIMIT_YEARS = 10 # Limite de anos para procurar para trás
 
 if not DATABASE_URL:
     raise ValueError("A variável de ambiente DATABASE_URL não foi definida.")
@@ -26,79 +27,131 @@ def get_db_session():
     Session = sessionmaker(bind=engine)
     return Session()
 
-def fetch_parties_from_tse_api():
+def find_latest_election_year():
     """
-    Busca e processa os dados de partidos diretamente da API do TSE.
+    Descobre o ano da eleição mais recente com dados disponíveis no TSE,
+    com um limite de busca.
     """
-    print(f"Buscando dados de partidos na API validada: {TSE_PARTIES_API_URL}")
+    print("🔎 Procurando o ano da eleição mais recente...")
+    current_year = date.today().year
+
+    # Começa pelo ano par mais recente
+    start_year = current_year if current_year % 2 == 0 else current_year - 1
+
+    for year in range(start_year, start_year - SEARCH_LIMIT_YEARS, -2):
+        zip_url = f"{TSE_DATA_BASE_URL}/consulta_cand_{year}.zip"
+        try:
+            print(f"   Testando ano {year}...")
+            response = requests.head(zip_url, timeout=5)
+            if response.status_code == 200:
+                print(f"✅ Ano da eleição encontrado: {year}")
+                if year != start_year:
+                    print(f"⚠️  Atenção: Os dados mais recentes encontrados são de {year}, que não é o ano corrente da eleição ({start_year}). Os dados podem estar defasados.")
+                return year
+        except requests.exceptions.RequestException:
+            continue
+
+    print(f"❌ Não foi possível encontrar um ano de eleição válido nos últimos {SEARCH_LIMIT_YEARS} anos.")
+    return None
+
+def fetch_and_extract_csv(year):
+    """
+    Baixa o arquivo ZIP de um ano específico, descompacta em memória
+    e retorna o conteúdo do arquivo CSV principal.
+    """
+    zip_url = f"{TSE_DATA_BASE_URL}/consulta_cand_{year}.zip"
+    target_csv_filename = f"consulta_cand_{year}_BRASIL.csv"
+
+    print(f"Baixando dados de: {zip_url}")
     try:
-        response = requests.get(TSE_PARTIES_API_URL)
+        response = requests.get(zip_url, stream=True)
         response.raise_for_status()
 
-        party_list = response.json()
+        with zipfile.ZipFile(io.BytesIO(response.content)) as z:
+            if target_csv_filename not in z.namelist():
+                raise FileNotFoundError(f"Arquivo '{target_csv_filename}' não encontrado no ZIP. Verifique o ano ou a estrutura do arquivo do TSE.")
 
-        if not isinstance(party_list, list):
-            print("❌ Erro: Formato de resposta da API inesperado.")
-            return None
-
-        parties_data = []
-        for party in party_list:
-            if "sigla" in party and "nome" in party and "numero" in party:
-                 parties_data.append({
-                    "party_name": party["nome"],
-                    "initials": party["sigla"],
-                    "party_number": int(party["numero"]),
-                })
-
-        print(f"Sucesso! {len(parties_data)} partidos encontrados na fonte de dados do TSE.")
-        return parties_data
+            with z.open(target_csv_filename) as csv_file:
+                return io.StringIO(csv_file.read().decode('latin-1'))
 
     except requests.exceptions.RequestException as e:
-        print(f"❌ Erro ao buscar os dados do TSE: {e}")
+        print(f"❌ Erro ao baixar o arquivo ZIP: {e}")
         return None
     except Exception as e:
-        print(f"❌ Erro ao processar a resposta da API: {e}")
+        print(f"❌ Erro ao processar o arquivo ZIP: {e}")
         return None
 
+def seed_election_data(year):
+    """
+    Processa o arquivo CSV de um ano e popula as tabelas
+    de eleições, partidos, políticos e candidaturas.
+    """
+    if year is None:
+        year = find_latest_election_year()
+        if not year:
+            return
 
-def seed_parties():
-    """
-    Popula a tabela 'parties' com os dados extraídos da API do TSE.
-    """
-    parties_data = fetch_parties_from_tse_api()
-    if not parties_data:
-        print("Não foi possível continuar a população devido a um erro na extração dos dados.")
+    csv_file_in_memory = fetch_and_extract_csv(year)
+    if not csv_file_in_memory:
         return
 
-    print("🚀 Iniciando a população da tabela de partidos...")
+    print(f"🚀 Iniciando a população do banco para a eleição de {year}...")
     db = get_db_session()
 
     try:
-        total_inserted = 0
-        total_updated = 0
+        elections_cache, parties_cache, politicians_cache = {}, {}, {}
+        reader = csv.DictReader(csv_file_in_memory, delimiter=';')
 
-        for party in parties_data:
-            result = db.execute(text("SELECT party_id FROM parties WHERE party_number = :number"), {"number": party["party_number"]}).fetchone()
+        count = 0
+        for row in reader:
+            election_key = f"{year}-{row['NR_TURNO']}"
+            if election_key not in elections_cache:
+                election_date = date(year, 10, int(row["NR_TURNO"][0]))
+                db.execute(
+                    text("INSERT INTO elections (election_date, election_type, turn) VALUES (:date, :type, :turn) ON CONFLICT DO NOTHING"),
+                    {"date": election_date, "type": row["DS_ELEICAO"], "turn": int(row["NR_TURNO"])}
+                )
+                db.commit()
+                election_id = db.execute(text("SELECT election_id FROM elections WHERE turn = :turn AND date_part('year', election_date) = :year"), {"turn": int(row["NR_TURNO"]), "year": year}).scalar_one()
+                elections_cache[election_key] = election_id
+            election_id = elections_cache[election_key]
 
-            if result:
-                db.execute(text("""
-                    UPDATE parties
-                    SET party_name = :name, initials = :initials
-                    WHERE party_number = :number
-                """), {"name": party["party_name"], "initials": party["initials"], "number": party["party_number"]})
-                total_updated += 1
-            else:
-                db.execute(text("""
-                    INSERT INTO parties (party_name, initials, party_number)
-                    VALUES (:name, :initials, :number)
-                """), {"name": party["party_name"], "initials": party["initials"], "number": party["party_number"]})
-                total_inserted += 1
+            party_number = int(row["NR_PARTIDO"])
+            if party_number not in parties_cache:
+                db.execute(
+                    text("INSERT INTO parties (party_number, initials, party_name) VALUES (:num, :init, :name) ON CONFLICT (party_number) DO UPDATE SET initials = :init, party_name = :name"),
+                    {"num": party_number, "init": row["SG_PARTIDO"], "name": row["NM_PARTIDO"]}
+                )
+                db.commit()
+                party_id = db.execute(text("SELECT party_id FROM parties WHERE party_number = :num"), {"num": party_number}).scalar_one()
+                parties_cache[party_number] = party_id
+            party_id = parties_cache[party_number]
+
+            politician_key = f'{row["NM_CANDIDATO"]}-{row["DT_NASCIMENTO"]}'
+            if politician_key not in politicians_cache:
+                politician_id = db.execute(
+                    text("INSERT INTO politicians (full_name, nickname) VALUES (:name, :nick) RETURNING politician_id"),
+                    {"name": row["NM_CANDIDATO"], "nick": row["NM_URNA_CANDIDATO"]}
+                ).scalar_one()
+                politicians_cache[politician_key] = politician_id
+            politician_id = politicians_cache[politician_key]
+
+            db.execute(
+                text("INSERT INTO candidacies (politician_id, party_id, election_id, office, electoral_number) VALUES (:p_id, :party_id, :e_id, :office, :num) ON CONFLICT DO NOTHING"),
+                {"p_id": politician_id, "party_id": party_id, "e_id": election_id, "office": row["DS_CARGO"], "num": int(row["NR_CANDIDATO"])}
+            )
+
+            count += 1
+            if count % 1000 == 0:
+                db.commit()
+                print(f"   ... {count} candidaturas processadas.")
 
         db.commit()
-        print(f"✅ Concluído! {total_inserted} partidos inseridos, {total_updated} partidos atualizados.")
+        print(f"✅ Concluído! Total de {count} candidaturas processadas.")
+        print(f"ℹ️  Fonte de dados utilizada: Eleição de {year}.")
 
     except Exception as e:
-        print(f"❌ Erro ao popular a tabela de partidos: {e}")
+        print(f"❌ Erro durante o seeding: {e}")
         db.rollback()
     finally:
         db.close()
@@ -109,12 +162,12 @@ def main():
 
     subparsers = parser.add_subparsers(dest="command", required=True, help="Comando a ser executado")
 
-    parser_parties = subparsers.add_parser("seed_parties", help="Popula a tabela de partidos políticos a partir dos dados do TSE.")
-    parser_parties.set_defaults(func=seed_parties)
+    parser_seed = subparsers.add_parser("seed_election_data", help="Popula o banco com dados de uma eleição do TSE.")
+    parser_seed.add_argument("--year", type=int, required=False, help="O ano da eleição a ser processada (ex: 2022). Se não for fornecido, busca o mais recente.")
+    parser_seed.set_defaults(func=lambda args: seed_election_data(args.year))
 
     args = parser.parse_args()
-    args.func()
-
+    args.func(args)
 
 if __name__ == "__main__":
     main()
