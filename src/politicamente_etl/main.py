@@ -1,4 +1,4 @@
-# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 13:52:56
+# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 14:09:29
 
 import os
 import argparse
@@ -15,9 +15,8 @@ import requests
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-# URL oficial do TSE para os dados de partidos políticos.
-# Pode mudar no futuro, é importante monitorar.
-TSE_PARTIES_DATA_URL = "https://cdn.tse.jus.br/estatistica/sead/odsele/partido_eleicao/partidos.csv"
+# URL oficial do TSE para os dados de partidos políticos, vindo do novo portal de dados abertos.
+TSE_PARTIES_DATA_URL = "https://cdn.tse.jus.br/estatistica/sead/odsele/partido/partidos.csv"
 
 
 if not DATABASE_URL:
