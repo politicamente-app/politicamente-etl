@@ -1,4 +1,4 @@
-<!-- Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 17:49:17 -->
+<!-- Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 17:57:22 -->
 
 # PoliticaMente ETL
 
@@ -41,14 +41,14 @@ Este é um projeto da organização **politicamente-app**.
 
 O script agora tem comandos específicos para cada tarefa, com opções que vêm depois do comando.
 
-* **Para popular apenas os partidos da eleição de 2022:**
+* **Para popular apenas os partidos de uma eleição:**
     ```sh
     python src/politicamente_etl/main.py seed_parties --year 2022
     ```
 
-* **Para popular políticos e candidaturas da eleição mais recente disponível:**
+* **Para popular os políticos e candidaturas (sem os partidos):**
     ```sh
-    python src/politicamente_etl/main.py seed_candidacies
+    python src/politicamente_etl/main.py seed_candidacies --year 2022
     ```
 * **Para forçar um novo download do arquivo do TSE, mesmo que ele já exista localmente:**
     ```sh
