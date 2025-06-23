@@ -1,4 +1,4 @@
-<!-- Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 16:35:33 -->
+<!-- Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 16:40:02 -->
 
 # PoliticaMente ETL
 
@@ -8,7 +8,7 @@ Este é um projeto da organização **politicamente-app**.
 
 ## Funcionalidades
 
-* **População de Partidos, Políticos e Candidaturas:** Extrai e carrega os dados de arquivos CSV oficiais de candidaturas do TSE.
+* **População de Partidos, Políticos e Candidaturas:** Extrai e carrega os dados de arquivos CSV oficiais de candidaturas do TSE de forma paralela e otimizada.
 
 ## Instalação e Uso
 
@@ -31,9 +31,10 @@ Este é um projeto da organização **politicamente-app**.
     ```
 3.  **Crie e configure o arquivo `.env`:**
     * Crie um arquivo chamado `.env` na pasta raiz do projeto.
-    * Dentro dele, adicione a string de conexão do seu banco de dados:
+    * Dentro dele, adicione a string de conexão do seu banco de dados e a configuração de paralelismo:
         ```
         DATABASE_URL="sua_string_de_conexao_aqui"
+        MAX_WORKERS=4
         ```
 
 ### 2. Como Executar o Script
