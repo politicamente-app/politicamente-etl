@@ -1,4 +1,4 @@
-# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 17:28:13
+# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 17:49:17
 
 import os
 import argparse
@@ -21,6 +21,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", 4))
 TSE_DATA_BASE_URL = "https://cdn.tse.jus.br/estatistica/sead/odsele/consulta_cand"
 DATA_DIR = "data"
+SEARCH_LIMIT_YEARS = 10 # Limite de anos para procurar para trás
 
 if not DATABASE_URL:
     raise ValueError("A variável de ambiente DATABASE_URL não foi definida.")
@@ -30,6 +31,24 @@ def get_db_session():
     engine = create_engine(DATABASE_URL)
     Session = sessionmaker(bind=engine)
     return Session()
+
+def find_latest_election_year():
+    """Descobre o ano da eleição mais recente com dados disponíveis no TSE."""
+    print("🔎 Procurando o ano da eleição mais recente...")
+    current_year = date.today().year
+    start_year = current_year if current_year % 2 == 0 else current_year - 1
+
+    for year in range(start_year, start_year - SEARCH_LIMIT_YEARS, -2):
+        zip_url = f"{TSE_DATA_BASE_URL}/consulta_cand_{year}.zip"
+        try:
+            print(f"   Testando ano {year}...")
+            response = requests.head(zip_url, timeout=5)
+            if response.status_code == 200:
+                print(f"✅ Ano da eleição encontrado: {year}")
+                return year
+        except requests.exceptions.RequestException:
+            continue
+    return None
 
 def get_election_data_as_dataframe(year, force_download=False):
     """
@@ -71,40 +90,25 @@ def get_election_data_as_dataframe(year, force_download=False):
         return None
 
 def seed_parties(df):
-    """Popula a tabela de partidos a partir de um DataFrame, com lógica de UPSERT robusta."""
-    if df is None:
-        print("DataFrame não fornecido. Abortando o seeding de partidos.")
-        return
-
+    """Popula a tabela de partidos a partir de um DataFrame."""
+    if df is None: return
     print("🚀 Iniciando a população da tabela de partidos...")
     parties_df = df[['NR_PARTIDO', 'SG_PARTIDO', 'NM_PARTIDO']].drop_duplicates(subset=['NR_PARTIDO'])
 
     db = get_db_session()
     try:
-        existing_parties_raw = db.execute(text("SELECT party_number, initials FROM parties")).all()
-        existing_numbers = {p.party_number for p in existing_parties_raw}
-        existing_initials = {p.initials for p in existing_parties_raw}
+        existing_numbers = {p.party_number for p in db.execute(text("SELECT party_number FROM parties")).all()}
 
         for _, row in tqdm(parties_df.iterrows(), total=len(parties_df), desc="Populando Partidos"):
             party_number = int(row["NR_PARTIDO"])
-            initials = row["SG_PARTIDO"]
-            party_name = row["NM_PARTIDO"]
-
+            # Lógica UPSERT
             if party_number in existing_numbers:
-                db.execute(
-                    text("UPDATE parties SET initials = :init, party_name = :name WHERE party_number = :num"),
-                    {"num": party_number, "init": initials, "name": party_name}
-                )
-            elif initials in existing_initials:
-                continue
+                db.execute(text("UPDATE parties SET initials = :init, party_name = :name WHERE party_number = :num"),
+                           {"num": party_number, "init": row["SG_PARTIDO"], "name": row["NM_PARTIDO"]})
             else:
-                db.execute(
-                    text("INSERT INTO parties (party_number, initials, party_name) VALUES (:num, :init, :name)"),
-                    {"num": party_number, "init": initials, "name": party_name}
-                )
+                db.execute(text("INSERT INTO parties (party_number, initials, party_name) VALUES (:num, :init, :name)"),
+                           {"num": party_number, "init": row["SG_PARTIDO"], "name": row["NM_PARTIDO"]})
                 existing_numbers.add(party_number)
-                existing_initials.add(initials)
-
         db.commit()
         print(f"✅ População de partidos concluída.")
     except Exception as e:
@@ -113,99 +117,93 @@ def seed_parties(df):
     finally:
         db.close()
 
-def process_chunk(chunk, year, parties_cache, pbar_position):
-    """Processa um 'pedaço' do DataFrame para inserir dados, com sua própria barra de progresso."""
+def process_chunk(chunk, year, parties_cache):
+    """Processa um 'pedaço' do DataFrame para inserir dados."""
     db = get_db_session()
     try:
-        elections_cache = {}
-        politicians_cache = {}
-
-        for _, row in tqdm(chunk.iterrows(), total=len(chunk), desc=f"Worker {pbar_position}", position=pbar_position, leave=False):
+        # Lógica de inserção
+        for _, row in chunk.iterrows():
+            # (A lógica interna permanece a mesma, mas está mais robusta)
+            # 1. Processa Eleição
             turn = int(row['NR_TURNO'])
             election_key = f"{year}-{turn}-{row['DS_ELEICAO']}"
-            if election_key not in elections_cache:
+            election_result = db.execute(text("SELECT election_id FROM elections WHERE turn = :turn AND date_part('year', election_date) = :year AND election_type = :type"),
+                                        {"turn": turn, "year": year, "type": row["DS_ELEICAO"]}).first()
+            if election_result:
+                election_id = election_result[0]
+            else:
                 day = 2 if turn == 1 else 30
                 election_date = date(year, 10, day)
-                db.execute(
-                    text("INSERT INTO elections (election_date, election_type, turn) VALUES (:date, :type, :turn) ON CONFLICT DO NOTHING"),
-                    {"date": election_date, "type": row["DS_ELEICAO"], "turn": turn}
-                )
+                election_id = db.execute(text("INSERT INTO elections (election_date, election_type, turn) VALUES (:date, :type, :turn) ON CONFLICT DO NOTHING RETURNING election_id"),
+                                        {"date": election_date, "type": row["DS_ELEICAO"], "turn": turn}).scalar_one_or_none()
                 db.commit()
-                election_result = db.execute(text("SELECT election_id FROM elections WHERE turn = :turn AND date_part('year', election_date) = :year AND election_type = :type"),
-                                             {"turn": turn, "year": year, "type": row["DS_ELEICAO"]}).first()
-                if election_result:
-                    elections_cache[election_key] = election_result[0]
-            election_id = elections_cache.get(election_key)
 
+            # 2. Processa Político
             politician_key = f'{row["NM_CANDIDATO"]}-{row["NM_URNA_CANDIDATO"]}'
-            if politician_key not in politicians_cache:
-                existing_politician = db.execute(text("SELECT politician_id FROM politicians WHERE full_name = :name AND nickname = :nick"), {"name": row["NM_CANDIDATO"], "nick": row["NM_URNA_CANDIDATO"]}).first()
-                if existing_politician:
-                    politician_id = existing_politician[0]
-                else:
-                    politician_id = db.execute(
-                        text("INSERT INTO politicians (politician_id, full_name, nickname) VALUES (:id, :name, :nick) RETURNING politician_id"),
-                        {"id": uuid.uuid4(), "name": row["NM_CANDIDATO"], "nick": row["NM_URNA_CANDIDATO"]}
-                    ).scalar_one()
-                politicians_cache[politician_key] = politician_id
-            politician_id = politicians_cache.get(politician_key)
+            existing_politician = db.execute(text("SELECT politician_id FROM politicians WHERE full_name = :name AND nickname = :nick"), {"name": row["NM_CANDIDATO"], "nick": row["NM_URNA_CANDIDATO"]}).first()
+            if existing_politician:
+                politician_id = existing_politician[0]
+            else:
+                politician_id = db.execute(text("INSERT INTO politicians (politician_id, full_name, nickname) VALUES (:id, :name, :nick) ON CONFLICT (full_name, nickname) DO NOTHING RETURNING politician_id"),
+                                            {"id": uuid.uuid4(), "name": row["NM_CANDIDATO"], "nick": row["NM_URNA_CANDIDATO"]}).scalar_one_or_none()
+                if not politician_id: # Se o conflito ocorreu e nada foi retornado
+                    politician_id = db.execute(text("SELECT politician_id FROM politicians WHERE full_name = :name AND nickname = :nick"), {"name": row["NM_CANDIDATO"], "nick": row["NM_URNA_CANDIDATO"]}).scalar()
 
+            # 3. Processa Candidatura
             party_id = parties_cache.get(int(row["NR_PARTIDO"]))
             if party_id and election_id and politician_id:
-                db.execute(
-                    text("INSERT INTO candidacies (politician_id, party_id, election_id, office, electoral_number) VALUES (:p_id, :party_id, :e_id, :office, :num) ON CONFLICT DO NOTHING"),
-                    {"p_id": politician_id, "party_id": party_id, "e_id": election_id, "office": row["DS_CARGO"], "num": int(row["NR_CANDIDATO"])}
-                )
+                db.execute(text("INSERT INTO candidacies (politician_id, party_id, election_id, office, electoral_number) VALUES (:p_id, :party_id, :e_id, :office, :num) ON CONFLICT DO NOTHING"),
+                           {"p_id": politician_id, "party_id": party_id, "e_id": election_id, "office": row["DS_CARGO"], "num": int(row["NR_CANDIDATO"])})
         db.commit()
+        return len(chunk) # Retorna o número de itens processados
     except Exception as e:
         db.rollback()
         raise e
     finally:
         db.close()
 
-def seed_politicians_and_candidacies(df, year):
+def seed_candidacies(df, year):
     """Popula as tabelas de politicos e candidaturas usando processamento paralelo."""
-    if df is None:
-        return
-
+    if df is None: return
     print(f"🚀 Iniciando a população de políticos e candidaturas com até {MAX_WORKERS} workers paralelos...")
 
     db = get_db_session()
     parties_cache = {row.party_number: row.party_id for row in db.execute(text("SELECT party_id, party_number FROM parties")).all()}
     db.close()
 
-    chunk_size = len(df) // MAX_WORKERS if len(df) > MAX_WORKERS else len(df)
-    chunks = [df.iloc[i:i + chunk_size] for i in range(0, len(df), chunk_size)]
+    chunks = [df.iloc[i:i + len(df) // MAX_WORKERS] for i in range(0, len(df), len(df) // MAX_WORKERS)]
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        # A barra de progresso geral agora rastreia a conclusão dos lotes (chunks)
-        with tqdm(total=len(chunks), desc="Progresso Geral dos Lotes", position=0) as pbar:
-            futures = {executor.submit(process_chunk, chunk, year, parties_cache, i + 1): i for i, chunk in enumerate(chunks)}
+        # A barra de progresso geral agora rastreia o total de registros processados
+        with tqdm(total=len(df), desc="Progresso Geral") as pbar:
+            futures = [executor.submit(process_chunk, chunk, year, parties_cache) for chunk in chunks]
 
             for future in as_completed(futures):
                 try:
-                    future.result()
+                    processed_count = future.result()
+                    pbar.update(processed_count) # Atualiza a barra com o número de itens do chunk
                 except Exception as e:
                     print(f"❌ Um erro ocorreu em um dos workers: {e}")
-                pbar.update(1) # Atualiza a barra de progresso geral quando um lote termina
 
     print(f"✅ Concluído! Processamento de {len(df)} candidaturas finalizado.")
-
 
 def main():
     """Função principal para analisar os argumentos e chamar a tarefa correta."""
     parser = argparse.ArgumentParser(description="Script de ETL para popular o banco de dados do PoliticaMente.")
 
-    parser.add_argument("--year", type=int, default=2022, help="O ano da eleição a ser processada (ex: 2022).")
-    parser.add_argument("--force-download", action='store_true', help="Força o download de um novo arquivo ZIP, mesmo que um já exista localmente.")
-
     subparsers = parser.add_subparsers(dest="command", required=True, help="Comando a ser executado")
 
+    # Parser para seed_parties
     parser_parties = subparsers.add_parser("seed_parties", help="Popula APENAS a tabela de partidos políticos.")
-    parser_parties.set_defaults(func=lambda args: seed_parties(get_election_data_as_dataframe(args.year, args.force_download)))
+    parser_parties.add_argument("--year", type=int, help="Ano da eleição para buscar os dados. Se omitido, busca o mais recente.")
+    parser_parties.add_argument("--force-download", action='store_true', help="Força um novo download do arquivo do TSE.")
+    parser_parties.set_defaults(func=lambda args: seed_parties(get_election_data_as_dataframe(args.year if args.year else find_latest_election_year(), args.force_download)))
 
+    # Parser para seed_candidacies
     parser_candidacies = subparsers.add_parser("seed_candidacies", help="Popula as tabelas de políticos e candidaturas.")
-    parser_candidacies.set_defaults(func=lambda args: seed_politicians_and_candidacies(get_election_data_as_dataframe(args.year, args.force_download), args.year))
+    parser_candidacies.add_argument("--year", type=int, help="Ano da eleição para buscar os dados. Se omitido, busca o mais recente.")
+    parser_candidacies.add_argument("--force-download", action='store_true', help="Força um novo download do arquivo do TSE.")
+    parser_candidacies.set_defaults(func=lambda args: seed_candidacies(get_election_data_as_dataframe(args.year if args.year else find_latest_election_year(), args.force_download), args.year if args.year else find_latest_election_year()))
 
     args = parser.parse_args()
     args.func(args)
