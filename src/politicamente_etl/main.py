@@ -1,4 +1,4 @@
-# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 16:27:10
+# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 16:32:36
 
 import os
 import argparse
@@ -78,7 +78,6 @@ def seed_parties(df):
 
     db = get_db_session()
     try:
-        # Cache de dados existentes para evitar conflitos
         existing_parties_raw = db.execute(text("SELECT party_number, initials FROM parties")).all()
         existing_numbers = {p.party_number for p in existing_parties_raw}
         existing_initials = {p.initials for p in existing_parties_raw}
@@ -92,19 +91,16 @@ def seed_parties(df):
             initials = row["SG_PARTIDO"]
             party_name = row["NM_PARTIDO"]
 
-            # Caso 1: O número do partido já existe. Apenas atualizamos.
             if party_number in existing_numbers:
                 db.execute(
                     text("UPDATE parties SET initials = :init, party_name = :name WHERE party_number = :num"),
                     {"num": party_number, "init": initials, "name": party_name}
                 )
                 total_updated += 1
-            # Caso 2: O número é novo, mas a sigla já existe (conflito). Pulamos.
             elif initials in existing_initials:
                 print(f"⚠️  Aviso: Sigla '{initials}' já existe para outro número. Pulando partido {party_name} ({party_number}).")
                 total_skipped += 1
                 continue
-            # Caso 3: Tudo novo. Inserimos.
             else:
                 db.execute(
                     text("INSERT INTO parties (party_number, initials, party_name) VALUES (:num, :init, :name)"),
@@ -131,39 +127,49 @@ def seed_politicians_and_candidacies(df, year):
     print("🚀 Iniciando a população de políticos e candidaturas...")
     db = get_db_session()
     try:
-        # Cache para evitar buscas repetidas
         parties_cache = {row.party_number: row.party_id for row in db.execute(text("SELECT party_id, party_number FROM parties")).all()}
         elections_cache = {}
         politicians_cache = {}
 
+        count = 0
         for _, row in df.iterrows():
-            # Processa eleição
-            election_key = f"{year}-{row['NR_TURNO']}"
+            # 1. Processa Eleição (UPSERT)
+            turn = int(row['NR_TURNO'])
+            election_key = f"{year}-{turn}"
             if election_key not in elections_cache:
-                election_date = date(year, 10, int(row["NR_TURNO"][0]))
-                db.execute(text("INSERT INTO elections (election_date, election_type, turn) VALUES (:date, :type, :turn) ON CONFLICT DO NOTHING"),
-                           {"date": election_date, "type": row["DS_ELEICAO"], "turn": int(row["NR_TURNO"])})
-                db.commit()
-                election_id = db.execute(text("SELECT election_id FROM elections WHERE turn = :turn AND date_part('year', election_date) = :year"), {"turn": int(row["NR_TURNO"]), "year": year}).scalar_one()
+                # CORREÇÃO: Usamos um dia fixo ou mapeado para evitar o erro.
+                # O dia 2 é para o 1º turno, 30 para o 2º, por exemplo.
+                day = 2 if turn == 1 else 30
+                election_date = date(year, 10, day)
+                db.execute(
+                    text("INSERT INTO elections (election_date, election_type, turn) VALUES (:date, :type, :turn) ON CONFLICT DO NOTHING"),
+                    {"date": election_date, "type": row["DS_ELEICAO"], "turn": turn}
+                )
+                db.commit() # Commit para garantir que o ID esteja disponível
+                election_id = db.execute(text("SELECT election_id FROM elections WHERE turn = :turn AND date_part('year', election_date) = :year"), {"turn": turn, "year": year}).scalar_one()
                 elections_cache[election_key] = election_id
             election_id = elections_cache[election_key]
 
-            # Processa político (com geração de UUID no script)
+            # 2. Processa Político (UPSERT via Nome+Apelido, com geração de UUID)
             politician_key = f'{row["NM_CANDIDATO"]}-{row["NM_URNA_CANDIDATO"]}'
             if politician_key not in politicians_cache:
                 new_politician_id = uuid.uuid4()
                 # Tenta inserir, se já existir (conflito no nome+apelido), não faz nada.
-                db.execute(
-                    text("INSERT INTO politicians (politician_id, full_name, nickname) VALUES (:id, :name, :nick) ON CONFLICT (full_name, nickname) DO NOTHING"),
-                    {"id": new_politician_id, "name": row["NM_CANDIDATO"], "nick": row["NM_URNA_CANDIDATO"]}
-                )
-                db.commit()
-                # Busca o ID do político (seja o recém-criado ou o que já existia)
-                politician_id = db.execute(text("SELECT politician_id FROM politicians WHERE full_name = :name AND nickname = :nick"), {"name": row["NM_CANDIDATO"], "nick": row["NM_URNA_CANDIDATO"]}).scalar_one()
+                # A lógica de UNIQUE para colunas de texto no Postgres é mais complexa.
+                # O ideal seria uma constraint UNIQUE(full_name, nickname) no modelo.
+                # Vamos simplificar assumindo que a combinação é única.
+                existing_politician = db.execute(text("SELECT politician_id FROM politicians WHERE full_name = :name AND nickname = :nick"), {"name": row["NM_CANDIDATO"], "nick": row["NM_URNA_CANDIDATO"]}).scalar_one_or_none()
+                if existing_politician:
+                    politician_id = existing_politician
+                else:
+                    politician_id = db.execute(
+                        text("INSERT INTO politicians (politician_id, full_name, nickname) VALUES (:id, :name, :nick) RETURNING politician_id"),
+                        {"id": new_politician_id, "name": row["NM_CANDIDATO"], "nick": row["NM_URNA_CANDIDATO"]}
+                    ).scalar_one()
                 politicians_cache[politician_key] = politician_id
             politician_id = politicians_cache[politician_key]
 
-            # Processa candidatura
+            # 3. Processa Candidatura
             party_id = parties_cache.get(int(row["NR_PARTIDO"]))
             if party_id:
                 db.execute(
@@ -171,8 +177,13 @@ def seed_politicians_and_candidacies(df, year):
                     {"p_id": politician_id, "party_id": party_id, "e_id": election_id, "office": row["DS_CARGO"], "num": int(row["NR_CANDIDATO"])}
                 )
 
+            count += 1
+            if count % 1000 == 0:
+                db.commit()
+                print(f"   ... {count} candidaturas processadas.")
+
         db.commit()
-        print(f"✅ Concluído! {len(df)} candidaturas processadas.")
+        print(f"✅ Concluído! Total de {count} candidaturas processadas.")
     except Exception as e:
         print(f"❌ Erro durante o seeding: {e}")
         db.rollback()
@@ -183,11 +194,9 @@ def main():
     """Função principal para analisar os argumentos e chamar a tarefa correta."""
     parser = argparse.ArgumentParser(description="Script de ETL para popular o banco de dados do PoliticaMente.")
 
-    # Argumentos globais
     parser.add_argument("--year", type=int, default=2022, help="O ano da eleição a ser processada (ex: 2022).")
     parser.add_argument("--force-download", action='store_true', help="Força o download de um novo arquivo ZIP, mesmo que um já exista localmente.")
 
-    # Subcomandos para cada tarefa
     subparsers = parser.add_subparsers(dest="command", required=True, help="Comando a ser executado")
 
     parser_parties = subparsers.add_parser("seed_parties", help="Popula APENAS a tabela de partidos políticos.")
