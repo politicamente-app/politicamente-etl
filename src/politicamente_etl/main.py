@@ -1,4 +1,4 @@
-# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-24 08:49:45
+# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-24 09:17:47
 
 import os
 import argparse
@@ -144,7 +144,8 @@ def process_candidacies_chunk(chunk, caches):
     try:
         candidacies_to_insert = []
         for _, row in chunk.iterrows():
-            election_key = f"{row['NR_ANO_ELEICAO']}-{row['NR_TURNO']}-{row['DS_ELEICAO']}"
+            # CORREÇÃO: Usando o nome correto da coluna 'ANO_ELEICAO'
+            election_key = f"{row['ANO_ELEICAO']}-{row['NR_TURNO']}-{row['DS_ELEICAO']}"
             politician_key = f'{row["NM_CANDIDATO"]}-{row["NM_URNA_CANDIDATO"]}'
 
             election_id = caches['elections'].get(election_key)
@@ -181,11 +182,12 @@ def seed_candidacies(df, year):
         parties_cache = {row.party_number: row.party_id for row in db.execute(text("SELECT party_id, party_number FROM parties")).all()}
         politicians_cache = {f'{p.full_name}-{p.nickname}': p.politician_id for p in db.execute(text("SELECT politician_id, full_name, nickname FROM politicians")).all()}
 
-        elections_df = df[['NR_ANO_ELEICAO', 'NR_TURNO', 'DS_ELEICAO']].drop_duplicates()
+        # CORREÇÃO: Usando o nome correto da coluna 'ANO_ELEICAO'
+        elections_df = df[['ANO_ELEICAO', 'NR_TURNO', 'DS_ELEICAO']].drop_duplicates()
         for _, row in tqdm(elections_df.iterrows(), total=len(elections_df), desc="Criando Eleições"):
             turn = int(row['NR_TURNO'])
             day = 2 if turn == 1 else 30
-            election_date = date(int(row['NR_ANO_ELEICAO']), 10, day)
+            election_date = date(int(row['ANO_ELEICAO']), 10, day)
             db.execute(text("INSERT INTO elections (election_date, election_type, turn) VALUES (:date, :type, :turn) ON CONFLICT DO NOTHING"),
                        {"date": election_date, "type": row["DS_ELEICAO"], "turn": turn})
         db.commit()
