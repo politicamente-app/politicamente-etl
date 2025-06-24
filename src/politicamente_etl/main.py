@@ -1,4 +1,4 @@
-# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-23 18:19:47
+# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-24 08:49:45
 
 import os
 import argparse
@@ -21,6 +21,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", 4))
 TSE_DATA_BASE_URL = "https://cdn.tse.jus.br/estatistica/sead/odsele/consulta_cand"
 DATA_DIR = "data"
+BATCH_SIZE = 1000 # Número de registros por lote de inserção
 
 if not DATABASE_URL:
     raise ValueError("A variável de ambiente DATABASE_URL não foi definida.")
@@ -68,19 +69,32 @@ def get_election_data_as_dataframe(year, force_download=False):
         return None
 
 def seed_parties(df):
-    """Popula a tabela de partidos a partir de um DataFrame."""
+    """Popula a tabela de partidos a partir de um DataFrame em lotes."""
     if df is None: return
     print("🚀 Iniciando a população da tabela de partidos...")
     parties_df = df[['NR_PARTIDO', 'SG_PARTIDO', 'NM_PARTIDO']].drop_duplicates(subset=['NR_PARTIDO'])
 
     db = get_db_session()
     try:
-        for _, row in tqdm(parties_df.iterrows(), total=len(parties_df), desc="Populando Partidos"):
-            db.execute(
-                text("INSERT INTO parties (party_number, initials, party_name) VALUES (:num, :init, :name) ON CONFLICT (party_number) DO UPDATE SET initials = :init, party_name = :name"),
-                {"num": int(row["NR_PARTIDO"]), "init": row["SG_PARTIDO"], "name": row["NM_PARTIDO"]}
-            )
-        db.commit()
+        parties_to_upsert = [
+            {"num": int(row["NR_PARTIDO"]), "init": row["SG_PARTIDO"], "name": row["NM_PARTIDO"]}
+            for _, row in parties_df.iterrows()
+        ]
+
+        if not parties_to_upsert:
+            print("Nenhum partido para inserir/atualizar.")
+            return
+
+        with tqdm(total=len(parties_to_upsert), desc="Processando Partidos") as pbar:
+            for i in range(0, len(parties_to_upsert), BATCH_SIZE):
+                batch = parties_to_upsert[i:i + BATCH_SIZE]
+                db.execute(
+                    text("INSERT INTO parties (party_number, initials, party_name) VALUES (:num, :init, :name) ON CONFLICT (party_number) DO UPDATE SET initials = :init, party_name = :name"),
+                    batch
+                )
+                db.commit()
+                pbar.update(len(batch))
+
         print(f"✅ População de partidos concluída.")
     except Exception as e:
         print(f"❌ Erro ao popular a tabela de partidos: {e}")
@@ -89,32 +103,34 @@ def seed_parties(df):
         db.close()
 
 def seed_politicians(df):
-    """Popula a tabela de políticos a partir de um DataFrame."""
+    """Popula a tabela de políticos a partir de um DataFrame em lotes."""
     if df is None: return
     print("🚀 Iniciando a população da tabela de políticos...")
     politicians_df = df[['NM_CANDIDATO', 'NM_URNA_CANDIDATO']].drop_duplicates()
 
     db = get_db_session()
     try:
-        politicians_to_insert = []
-        for _, row in tqdm(politicians_df.iterrows(), total=len(politicians_df), desc="Preparando Políticos"):
-            politicians_to_insert.append({
-                "id": uuid.uuid4(),
-                "name": row["NM_CANDIDATO"],
-                "nick": row["NM_URNA_CANDIDATO"]
-            })
+        politicians_to_insert = [
+            {"id": uuid.uuid4(), "name": row["NM_CANDIDATO"], "nick": row["NM_URNA_CANDIDATO"]}
+            for _, row in politicians_df.iterrows()
+        ]
 
         if not politicians_to_insert:
             print("Nenhum novo político para inserir.")
             return
 
-        print(f"Inserindo {len(politicians_to_insert)} políticos únicos no banco de dados...")
-        # Inserção em lote
-        db.execute(
-            text("INSERT INTO politicians (politician_id, full_name, nickname) VALUES (:id, :name, :nick) ON CONFLICT (full_name, nickname) DO NOTHING"),
-            politicians_to_insert
-        )
-        db.commit()
+        print(f"Inserindo {len(politicians_to_insert)} políticos únicos em lotes de {BATCH_SIZE}...")
+
+        with tqdm(total=len(politicians_to_insert), desc="Inserindo Políticos") as pbar:
+            for i in range(0, len(politicians_to_insert), BATCH_SIZE):
+                batch = politicians_to_insert[i:i + BATCH_SIZE]
+                db.execute(
+                    text("INSERT INTO politicians (politician_id, full_name, nickname) VALUES (:id, :name, :nick) ON CONFLICT (full_name, nickname) DO NOTHING"),
+                    batch
+                )
+                db.commit()
+                pbar.update(len(batch))
+
         print("✅ População de políticos concluída.")
     except Exception as e:
         print(f"❌ Erro ao popular a tabela de políticos: {e}")
@@ -161,11 +177,10 @@ def seed_candidacies(df, year):
 
     db = get_db_session()
     try:
-        # Pré-carrega caches
+        print("   Pré-carregando caches de Partidos e Políticos...")
         parties_cache = {row.party_number: row.party_id for row in db.execute(text("SELECT party_id, party_number FROM parties")).all()}
         politicians_cache = {f'{p.full_name}-{p.nickname}': p.politician_id for p in db.execute(text("SELECT politician_id, full_name, nickname FROM politicians")).all()}
 
-        # Cria as eleições primeiro
         elections_df = df[['NR_ANO_ELEICAO', 'NR_TURNO', 'DS_ELEICAO']].drop_duplicates()
         for _, row in tqdm(elections_df.iterrows(), total=len(elections_df), desc="Criando Eleições"):
             turn = int(row['NR_TURNO'])
@@ -176,10 +191,10 @@ def seed_candidacies(df, year):
         db.commit()
         elections_cache = {f"{int(e.date_part)}-{e.turn}-{e.election_type}": e.election_id for e in db.execute(text("SELECT election_id, date_part('year', election_date) as date_part, turn, election_type FROM elections")).all()}
 
-        # Processamento paralelo de candidaturas
-        chunks = [df.iloc[i:i + 5000] for i in range(0, len(df), 5000)] # Lotes de 5000
+        chunks = [df.iloc[i:i + 5000] for i in range(0, len(df), 5000)]
         caches = {'parties': parties_cache, 'politicians': politicians_cache, 'elections': elections_cache}
 
+        print(f"Iniciando processamento paralelo de {len(df)} candidaturas...")
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             with tqdm(total=len(df), desc="Processando Candidaturas") as pbar:
                 futures = [executor.submit(process_candidacies_chunk, chunk, caches) for chunk in chunks]
@@ -199,7 +214,6 @@ def main():
 
     subparsers = parser.add_subparsers(dest="command", required=True, help="Comando a ser executado")
 
-    # Parser base para opções comuns
     base_parser = argparse.ArgumentParser(add_help=False)
     base_parser.add_argument("--year", type=int, default=date.today().year, help="Ano da eleição.")
     base_parser.add_argument("--force-download", action='store_true')
@@ -210,7 +224,7 @@ def main():
     parser_politicians = subparsers.add_parser("seed_politicians", help="Popula APENAS a tabela de políticos.", parents=[base_parser])
     parser_politicians.set_defaults(func=lambda args: seed_politicians(get_election_data_as_dataframe(args.year, args.force_download)))
 
-    parser_candidacies = subparsers.add_parser("seed_candidacies", help="Popula a tabela de candidaturas (requer partidos e políticos já populados).", parents=[base_parser])
+    parser_candidacies = subparsers.add_parser("seed_candidacies", help="Popula a tabela de candidaturas.", parents=[base_parser])
     parser_candidacies.set_defaults(func=lambda args: seed_candidacies(get_election_data_as_dataframe(args.year, args.force_download), args.year))
 
     args = parser.parse_args()
