@@ -1,4 +1,4 @@
-<!-- Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-30 13:40:40 -->
+<!-- Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-30 14:36:33 -->
 
 # PoliticaMente ETL
 
@@ -9,6 +9,7 @@ Este é um projeto da organização **politicamente-app**.
 ## Funcionalidades
 
 * **População de Partidos, Políticos, Coligações e Candidaturas:** Extrai e carrega os dados de arquivos CSV oficiais de candidaturas do TSE de forma paralela e otimizada.
+* **Atualização de Resultados:** Processa os arquivos de votação para atualizar as candidaturas com o total de votos e o status final (eleito, não eleito, etc.).
 
 ## Instalação e Uso
 
@@ -59,4 +60,8 @@ O script agora tem comandos específicos para cada tarefa. **É recomendado exec
 4.  **Popular as candidaturas:**
     ```sh
     python src/politicamente_etl/main.py seed_candidacies --year 2022
+    ```
+5.  **Atualizar os resultados da eleição:**
+    ```sh
+    python src/politicamente_etl/main.py update_results --year 2022
     ```
