@@ -1,4 +1,4 @@
-# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-30 11:21:33
+# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-30 13:40:40
 
 import os
 import argparse
@@ -143,39 +143,31 @@ def seed_coalitions(df, year):
     if df is None: return
     print("🚀 Iniciando a população da tabela de coligações...")
 
-    # Filtra apenas as linhas que são de coligação
-    coalitions_df = df[df['TP_AGREMIACAO'] == 'COLIGAÇÃO'][['NM_COLIGACAO', 'DS_COMPOSICAO_COLIGACAO']].drop_duplicates()
+    coalitions_df = df[df['TP_AGREMIACAO'] == 'COLIGAÇÃO'][['NM_COLIGACAO', 'DS_COMPOSICAO_COLIGACAO', 'NR_TURNO', 'DS_ELEICAO']].drop_duplicates()
 
     db = get_db_session()
     try:
         print("   Pré-carregando caches de Partidos e Eleições...")
         parties_cache = {row.initials: row.party_id for row in db.execute(text("SELECT party_id, initials FROM parties")).all()}
-        elections_cache = {f"{int(e.date_part)}-{e.turn}-{e.election_type}": e.election_id for e in db.execute(text("SELECT election_id, date_part('year', election_date) as date_part, turn, election_type FROM elections")).all()}
-
-        # Assume uma única eleição principal para simplificar
-        # Em um sistema real, a coligação deveria estar ligada a uma eleição específica
-        election_id = next(iter(elections_cache.values()), None)
-        if not election_id:
-            print("❌ Nenhuma eleição encontrada no banco. Cancele o seeding de coligações.")
-            return
+        elections_cache = {f"{year}-{e.turn}-{e.election_type}": e.election_id for e in db.execute(text("SELECT election_id, turn, election_type FROM elections WHERE date_part('year', election_date) = :year"), {"year": year}).all()}
 
         for _, row in tqdm(coalitions_df.iterrows(), total=len(coalitions_df), desc="Processando Coligações"):
             coalition_name = row['NM_COLIGACAO']
             composition = row['DS_COMPOSICAO_COLIGACAO']
+            election_key = f"{year}-{row['NR_TURNO']}-{row['DS_ELEICAO']}"
+            election_id = elections_cache.get(election_key)
+
+            if not election_id: continue
 
             # Insere a coligação e obtém o ID
-            result = db.execute(
-                text("INSERT INTO coligacoes (nome_coligacao, id_eleicao_fk) VALUES (:name, :e_id) ON CONFLICT DO NOTHING RETURNING coligacao_id"),
+            coalition_id = db.execute(
+                text("INSERT INTO coalitions (nome_coligacao, id_eleicao_fk) VALUES (:name, :e_id) ON CONFLICT (nome_coligacao, id_eleicao_fk) DO NOTHING RETURNING coligacao_id"),
                 {"name": coalition_name, "e_id": election_id}
             ).scalar_one_or_none()
-            db.commit()
 
-            # Se a coligação já existia, busca o ID dela
-            if not result:
-                result = db.execute(text("SELECT coligacao_id FROM coligacoes WHERE nome_coligacao = :name AND id_eleicao_fk = :e_id"),
+            if not coalition_id:
+                coalition_id = db.execute(text("SELECT coligacao_id FROM coalitions WHERE nome_coligacao = :name AND id_eleicao_fk = :e_id"),
                                     {"name": coalition_name, "e_id": election_id}).scalar_one()
-
-            coalition_id = result
 
             # Processa os partidos da composição
             party_initials = [p.strip() for p in composition.split('/')]
@@ -183,7 +175,7 @@ def seed_coalitions(df, year):
                 party_id = parties_cache.get(initial)
                 if party_id and coalition_id:
                     db.execute(
-                        text("INSERT INTO coligacao_partidos (id_coligacao_fk, id_partido_fk) VALUES (:c_id, :p_id) ON CONFLICT DO NOTHING"),
+                        text("INSERT INTO coalition_parties (coligacao_id, party_id) VALUES (:c_id, :p_id) ON CONFLICT DO NOTHING"),
                         {"c_id": coalition_id, "p_id": party_id}
                     )
 
@@ -194,7 +186,6 @@ def seed_coalitions(df, year):
         db.rollback()
     finally:
         db.close()
-
 
 def main():
     """Função principal para analisar os argumentos e chamar a tarefa correta."""
@@ -215,7 +206,8 @@ def main():
     parser_coalitions = subparsers.add_parser("seed_coalitions", help="Popula a tabela de coligações.", parents=[base_parser])
     parser_coalitions.set_defaults(func=lambda args: seed_coalitions(get_election_data_as_dataframe(args.year, args.force_download), args.year))
 
-    # ... outros subparsers ...
+    # parser_candidacies = subparsers.add_parser("seed_candidacies", help="Popula a tabela de candidaturas.", parents=[base_parser])
+    # parser_candidacies.set_defaults(func=lambda args: seed_candidacies(get_election_data_as_dataframe(args.year, args.force_download), args.year))
 
     args = parser.parse_args()
     args.func(args)
