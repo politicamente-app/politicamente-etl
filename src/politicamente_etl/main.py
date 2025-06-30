@@ -1,4 +1,4 @@
-# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-24 09:17:47
+# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-30 11:21:33
 
 import os
 import argparse
@@ -138,77 +138,63 @@ def seed_politicians(df):
     finally:
         db.close()
 
-def process_candidacies_chunk(chunk, caches):
-    """Processa um 'pedaço' do DataFrame para inserir candidaturas."""
-    db = get_db_session()
-    try:
-        candidacies_to_insert = []
-        for _, row in chunk.iterrows():
-            # CORREÇÃO: Usando o nome correto da coluna 'ANO_ELEICAO'
-            election_key = f"{row['ANO_ELEICAO']}-{row['NR_TURNO']}-{row['DS_ELEICAO']}"
-            politician_key = f'{row["NM_CANDIDATO"]}-{row["NM_URNA_CANDIDATO"]}'
-
-            election_id = caches['elections'].get(election_key)
-            politician_id = caches['politicians'].get(politician_key)
-            party_id = caches['parties'].get(int(row["NR_PARTIDO"]))
-
-            if party_id and election_id and politician_id:
-                candidacies_to_insert.append({
-                    "p_id": politician_id, "party_id": party_id, "e_id": election_id,
-                    "office": row["DS_CARGO"], "num": int(row["NR_CANDIDATO"])
-                })
-
-        if candidacies_to_insert:
-            db.execute(
-                text("INSERT INTO candidacies (politician_id, party_id, election_id, office, electoral_number) VALUES (:p_id, :party_id, :e_id, :office, :num) ON CONFLICT DO NOTHING"),
-                candidacies_to_insert
-            )
-            db.commit()
-        return len(chunk)
-    except Exception as e:
-        db.rollback()
-        raise e
-    finally:
-        db.close()
-
-def seed_candidacies(df, year):
-    """Popula as tabelas de eleições e candidaturas."""
+def seed_coalitions(df, year):
+    """Popula as tabelas de coligações e suas associações com partidos."""
     if df is None: return
-    print("🚀 Iniciando a população de eleições e candidaturas...")
+    print("🚀 Iniciando a população da tabela de coligações...")
+
+    # Filtra apenas as linhas que são de coligação
+    coalitions_df = df[df['TP_AGREMIACAO'] == 'COLIGAÇÃO'][['NM_COLIGACAO', 'DS_COMPOSICAO_COLIGACAO']].drop_duplicates()
 
     db = get_db_session()
     try:
-        print("   Pré-carregando caches de Partidos e Políticos...")
-        parties_cache = {row.party_number: row.party_id for row in db.execute(text("SELECT party_id, party_number FROM parties")).all()}
-        politicians_cache = {f'{p.full_name}-{p.nickname}': p.politician_id for p in db.execute(text("SELECT politician_id, full_name, nickname FROM politicians")).all()}
-
-        # CORREÇÃO: Usando o nome correto da coluna 'ANO_ELEICAO'
-        elections_df = df[['ANO_ELEICAO', 'NR_TURNO', 'DS_ELEICAO']].drop_duplicates()
-        for _, row in tqdm(elections_df.iterrows(), total=len(elections_df), desc="Criando Eleições"):
-            turn = int(row['NR_TURNO'])
-            day = 2 if turn == 1 else 30
-            election_date = date(int(row['ANO_ELEICAO']), 10, day)
-            db.execute(text("INSERT INTO elections (election_date, election_type, turn) VALUES (:date, :type, :turn) ON CONFLICT DO NOTHING"),
-                       {"date": election_date, "type": row["DS_ELEICAO"], "turn": turn})
-        db.commit()
+        print("   Pré-carregando caches de Partidos e Eleições...")
+        parties_cache = {row.initials: row.party_id for row in db.execute(text("SELECT party_id, initials FROM parties")).all()}
         elections_cache = {f"{int(e.date_part)}-{e.turn}-{e.election_type}": e.election_id for e in db.execute(text("SELECT election_id, date_part('year', election_date) as date_part, turn, election_type FROM elections")).all()}
 
-        chunks = [df.iloc[i:i + 5000] for i in range(0, len(df), 5000)]
-        caches = {'parties': parties_cache, 'politicians': politicians_cache, 'elections': elections_cache}
+        # Assume uma única eleição principal para simplificar
+        # Em um sistema real, a coligação deveria estar ligada a uma eleição específica
+        election_id = next(iter(elections_cache.values()), None)
+        if not election_id:
+            print("❌ Nenhuma eleição encontrada no banco. Cancele o seeding de coligações.")
+            return
 
-        print(f"Iniciando processamento paralelo de {len(df)} candidaturas...")
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            with tqdm(total=len(df), desc="Processando Candidaturas") as pbar:
-                futures = [executor.submit(process_candidacies_chunk, chunk, caches) for chunk in chunks]
-                for future in as_completed(futures):
-                    processed_count = future.result()
-                    pbar.update(processed_count)
+        for _, row in tqdm(coalitions_df.iterrows(), total=len(coalitions_df), desc="Processando Coligações"):
+            coalition_name = row['NM_COLIGACAO']
+            composition = row['DS_COMPOSICAO_COLIGACAO']
 
-        print(f"✅ Concluído! Processamento de candidaturas finalizado.")
+            # Insere a coligação e obtém o ID
+            result = db.execute(
+                text("INSERT INTO coligacoes (nome_coligacao, id_eleicao_fk) VALUES (:name, :e_id) ON CONFLICT DO NOTHING RETURNING coligacao_id"),
+                {"name": coalition_name, "e_id": election_id}
+            ).scalar_one_or_none()
+            db.commit()
+
+            # Se a coligação já existia, busca o ID dela
+            if not result:
+                result = db.execute(text("SELECT coligacao_id FROM coligacoes WHERE nome_coligacao = :name AND id_eleicao_fk = :e_id"),
+                                    {"name": coalition_name, "e_id": election_id}).scalar_one()
+
+            coalition_id = result
+
+            # Processa os partidos da composição
+            party_initials = [p.strip() for p in composition.split('/')]
+            for initial in party_initials:
+                party_id = parties_cache.get(initial)
+                if party_id and coalition_id:
+                    db.execute(
+                        text("INSERT INTO coligacao_partidos (id_coligacao_fk, id_partido_fk) VALUES (:c_id, :p_id) ON CONFLICT DO NOTHING"),
+                        {"c_id": coalition_id, "p_id": party_id}
+                    )
+
+        db.commit()
+        print("✅ População de coligações concluída.")
     except Exception as e:
-        print(f"❌ Erro durante o seeding de candidaturas: {e}")
+        print(f"❌ Erro ao popular a tabela de coligações: {e}")
+        db.rollback()
     finally:
         db.close()
+
 
 def main():
     """Função principal para analisar os argumentos e chamar a tarefa correta."""
@@ -226,8 +212,10 @@ def main():
     parser_politicians = subparsers.add_parser("seed_politicians", help="Popula APENAS a tabela de políticos.", parents=[base_parser])
     parser_politicians.set_defaults(func=lambda args: seed_politicians(get_election_data_as_dataframe(args.year, args.force_download)))
 
-    parser_candidacies = subparsers.add_parser("seed_candidacies", help="Popula a tabela de candidaturas.", parents=[base_parser])
-    parser_candidacies.set_defaults(func=lambda args: seed_candidacies(get_election_data_as_dataframe(args.year, args.force_download), args.year))
+    parser_coalitions = subparsers.add_parser("seed_coalitions", help="Popula a tabela de coligações.", parents=[base_parser])
+    parser_coalitions.set_defaults(func=lambda args: seed_coalitions(get_election_data_as_dataframe(args.year, args.force_download), args.year))
+
+    # ... outros subparsers ...
 
     args = parser.parse_args()
     args.func(args)

@@ -1,4 +1,4 @@
-<!-- Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-24 09:17:47 -->
+<!-- Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-06-30 11:21:33 -->
 
 # PoliticaMente ETL
 
@@ -8,7 +8,7 @@ Este é um projeto da organização **politicamente-app**.
 
 ## Funcionalidades
 
-* **População de Partidos, Políticos e Candidaturas:** Extrai e carrega os dados de arquivos CSV oficiais de candidaturas do TSE de forma paralela e otimizada.
+* **População de Partidos, Políticos, Coligações e Candidaturas:** Extrai e carrega os dados de arquivos CSV oficiais de candidaturas do TSE de forma paralela e otimizada.
 
 ## Instalação e Uso
 
@@ -51,12 +51,12 @@ O script agora tem comandos específicos para cada tarefa. **É recomendado exec
     python src/politicamente_etl/main.py seed_politicians --year 2022
     ```
 
-3.  **Popular as candidaturas:**
+3.  **Popular as coligações:**
     ```sh
-    python src/politicamente_etl/main.py seed_candidacies --year 2022
+    python src/politicamente_etl/main.py seed_coalitions --year 2022
     ```
 
-* **Para forçar um novo download do arquivo do TSE:**
+4.  **Popular as candidaturas:**
     ```sh
-    python src/politicamente_etl/main.py seed_parties --year 2022 --force-download
+    python src/politicamente_etl/main.py seed_candidacies --year 2022
     ```
