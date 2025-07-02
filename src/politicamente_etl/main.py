@@ -1,4 +1,4 @@
-# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-07-02 15:49:00
+# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-07-02 15:51:53
 
 import os
 import argparse
@@ -15,7 +15,7 @@ import pandas as pd
 from tqdm import tqdm
 
 # --- CONFIGURAÇÃO ---
-SCRIPT_VERSION = "1.5.0"
+SCRIPT_VERSION = "1.6.0"
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -56,7 +56,7 @@ def get_tse_data_generator(year, base_url, file_prefix, force_download=False):
 
     if not os.path.exists(zip_filepath) or force_download:
         zip_url = f"{base_url}/{zip_filename}"
-        logger.info(f"Baixando dados de: {zip_url}")
+        print(f"Baixando dados de: {zip_url}")
         try:
             response = requests.get(zip_url, stream=True)
             response.raise_for_status()
@@ -66,12 +66,12 @@ def get_tse_data_generator(year, base_url, file_prefix, force_download=False):
                     for chunk in response.iter_content(chunk_size=8192):
                         pbar.update(len(chunk))
                         f.write(chunk)
-            logger.info(f"Download concluído. Arquivo salvo em: {zip_filepath}")
+            print(f"Download concluído. Arquivo salvo em: {zip_filepath}")
         except requests.exceptions.RequestException as e:
             logger.error(f"Erro ao baixar o arquivo ZIP: {e}")
             return
     else:
-        logger.info(f"Usando arquivo ZIP local já baixado: {zip_filepath}")
+        print(f"Usando arquivo ZIP local já baixado: {zip_filepath}")
 
     try:
         with zipfile.ZipFile(zip_filepath) as z:
@@ -79,7 +79,6 @@ def get_tse_data_generator(year, base_url, file_prefix, force_download=False):
             if not csv_files:
                 raise FileNotFoundError("Nenhum arquivo CSV encontrado no ZIP.")
 
-            # Prioriza o arquivo consolidado
             consolidated_file = f"{file_prefix}_{year}_BRASIL.csv"
             if consolidated_file in csv_files:
                 logger.info(f"Encontrado arquivo consolidado, processando apenas: {consolidated_file}")
@@ -95,18 +94,18 @@ def get_tse_data_generator(year, base_url, file_prefix, force_download=False):
 
 def update_results(df_generator):
     """Atualiza a tabela de candidaturas com os resultados da votação."""
-    logger.info("🚀 Iniciando a atualização dos resultados das candidaturas...")
+    print("🚀 Iniciando a atualização dos resultados das candidaturas...")
 
     aggregated_results = {}
 
-    for df in df_generator:
-        for _, row in tqdm(df.iterrows(), total=len(df), desc=f"Agregando votos de {df['SG_UF'].iloc[0]}", leave=False):
+    for df in tqdm(df_generator, desc="Processando arquivos de votação"):
+        for _, row in df.iterrows():
             key = str(row['SQ_CANDIDATO'])
             if key not in aggregated_results:
                 aggregated_results[key] = {"total_votes": 0, "status": row['DS_SIT_TOT_TURNO']}
             aggregated_results[key]["total_votes"] += int(row['QT_VOTOS'])
 
-    logger.info(f"Agregação concluída. {len(aggregated_results)} resultados únicos de candidatos para atualizar.")
+    print(f"Agregação concluída. {len(aggregated_results)} resultados únicos de candidatos para atualizar.")
 
     db = get_db_session()
     try:
@@ -128,17 +127,17 @@ def update_results(df_generator):
                             logger.warning(f"Nenhuma candidatura encontrada para o SQ_CANDIDATO: {item['sq_tse']}. Nenhum registro foi atualizado.")
                 pbar.update(len(batch))
 
-        logger.info(f"✅ Atualização de resultados concluída. {updated_count} registros de candidaturas foram atualizados.")
+        print(f"✅ Atualização de resultados concluída. {updated_count} registros de candidaturas foram atualizados.")
     except Exception as e:
         logger.error(f"Erro ao atualizar os resultados: {e}")
         db.rollback()
     finally:
         db.close()
 
-# ... (outras funções de seeding permanecem as mesmas, mas usando logger em vez de print) ...
+# ... (outras funções de seeding permanecem as mesmas, mas usando print em vez de logger.info) ...
 def seed_parties(df_generator):
     """Popula a tabela de partidos a partir de um DataFrame."""
-    logger.info("🚀 Iniciando a população da tabela de partidos...")
+    print("🚀 Iniciando a população da tabela de partidos...")
     all_parties = pd.DataFrame()
     for df in tqdm(df_generator, desc="Lendo arquivos de dados"):
         all_parties = pd.concat([all_parties, df[['NR_PARTIDO', 'SG_PARTIDO', 'NM_PARTIDO']]])
@@ -154,7 +153,7 @@ def seed_parties(df_generator):
                 db.execute(text("INSERT INTO parties (party_number, initials, party_name) VALUES (:num, :init, :name) ON CONFLICT (party_number) DO UPDATE SET initials = :init, party_name = :name"), batch)
                 db.commit()
                 pbar.update(len(batch))
-        logger.info("✅ População de partidos concluída.")
+        print("✅ População de partidos concluída.")
     except Exception as e:
         logger.error(f"Erro ao popular a tabela de partidos: {e}")
         db.rollback()
