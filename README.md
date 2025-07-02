@@ -1,4 +1,4 @@
-<!-- Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-07-02 15:54:58 -->
+<!-- Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-07-02 15:57:26 -->
 
 # PoliticaMente ETL
 
@@ -40,28 +40,18 @@ Este é um projeto da organização **politicamente-app**.
 
 ### 2. Como Executar o Script
 
-O script agora tem comandos específicos para cada tarefa. **É recomendado executar os comandos nesta ordem:**
+O script agora tem um comando principal que executa todas as etapas de seeding de uma vez, além dos comandos individuais.
 
-1.  **Popular os partidos:**
+* **Para popular o banco com todos os dados de uma eleição (Recomendado):**
+    ```sh
+    python src/politicamente_etl/main.py seed_all --year 2022
+    ```
+
+* **Para executar etapas individuais (para depuração):**
     ```sh
     python src/politicamente_etl/main.py seed_parties --year 2022
-    ```
-
-2.  **Popular os políticos:**
-    ```sh
     python src/politicamente_etl/main.py seed_politicians --year 2022
-    ```
-
-3.  **Popular as coligações:**
-    ```sh
     python src/politicamente_etl/main.py seed_coalitions --year 2022
-    ```
-
-4.  **Popular as candidaturas:**
-    ```sh
     python src/politicamente_etl/main.py seed_candidacies --year 2022
-    ```
-5.  **Atualizar os resultados da eleição:**
-    ```sh
     python src/politicamente_etl/main.py update_results --year 2022
     ```
