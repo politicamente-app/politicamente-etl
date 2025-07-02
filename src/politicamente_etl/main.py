@@ -1,4 +1,4 @@
-# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-07-02 04:40:24
+# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-07-02 15:31:32
 
 import os
 import argparse
@@ -125,53 +125,6 @@ def seed_politicians(df):
     finally:
         db.close()
 
-def seed_coalitions(df, year):
-    """Popula as tabelas de coligações e suas associações com partidos."""
-    if df is None: return
-    print("🚀 Iniciando a população da tabela de coligações...")
-
-    coalitions_df = df[df['TP_AGREMIACAO'] == 'COLIGAÇÃO'][['NM_COLIGACAO', 'DS_COMPOSICAO_COLIGACAO', 'NR_TURNO', 'DS_ELEICAO']].drop_duplicates()
-
-    db = get_db_session()
-    try:
-        print("   Pré-carregando caches de Partidos e Eleições...")
-        parties_cache = {row.initials: row.party_id for row in db.execute(text("SELECT party_id, initials FROM parties")).all()}
-        elections_cache = {f"{year}-{e.turn}-{e.election_type}": e.election_id for e in db.execute(text("SELECT election_id, turn, election_type FROM elections WHERE date_part('year', election_date) = :year"), {"year": year}).all()}
-
-        for _, row in tqdm(coalitions_df.iterrows(), total=len(coalitions_df), desc="Processando Coligações"):
-            coalition_name = row['NM_COLIGACAO']
-            composition = row['DS_COMPOSICAO_COLIGACAO']
-            election_key = f"{year}-{row['NR_TURNO']}-{row['DS_ELEICAO']}"
-            election_id = elections_cache.get(election_key)
-
-            if not election_id: continue
-
-            coalition_id = db.execute(
-                text("INSERT INTO coalitions (nome_coligacao, id_eleicao_fk) VALUES (:name, :e_id) ON CONFLICT (nome_coligacao, id_eleicao_fk) DO NOTHING RETURNING coligacao_id"),
-                {"name": coalition_name, "e_id": election_id}
-            ).scalar_one_or_none()
-
-            if not coalition_id:
-                coalition_id = db.execute(text("SELECT coligacao_id FROM coalitions WHERE nome_coligacao = :name AND id_eleicao_fk = :e_id"),
-                                    {"name": coalition_name, "e_id": election_id}).scalar_one()
-
-            party_initials = [p.strip() for p in composition.split('/')]
-            for initial in party_initials:
-                party_id = parties_cache.get(initial)
-                if party_id and coalition_id:
-                    db.execute(
-                        text("INSERT INTO coalition_parties (coligacao_id, party_id) VALUES (:c_id, :p_id) ON CONFLICT DO NOTHING"),
-                        {"c_id": coalition_id, "p_id": party_id}
-                    )
-
-        db.commit()
-        print("✅ População de coligações concluída.")
-    except Exception as e:
-        print(f"❌ Erro ao popular a tabela de coligações: {e}")
-        db.rollback()
-    finally:
-        db.close()
-
 def seed_candidacies(df, year):
     """Popula as tabelas de eleições e candidaturas."""
     if df is None: return
@@ -233,6 +186,7 @@ def update_results(df_generator):
     aggregated_results = {}
 
     for df in df_generator:
+        # CORREÇÃO: Usar a coluna correta para o ID do candidato no arquivo de votação
         for _, row in tqdm(df.iterrows(), total=len(df), desc=f"Agregando votos de {df['SG_UF'].iloc[0]}", leave=False):
             key = str(row['SQ_CANDIDATO'])
             if key not in aggregated_results:
@@ -253,6 +207,7 @@ def update_results(df_generator):
                 batch = updates[i:i + BATCH_SIZE]
                 with db.begin():
                     for item in batch:
+                        # CORREÇÃO: A query de UPDATE agora usa a chave correta e única
                         db.execute(
                             text("UPDATE candidacies SET total_votes_received = :total_votes, status_resultado = :status WHERE sq_candidate_tse = :sq_tse"),
                             item
@@ -266,26 +221,6 @@ def update_results(df_generator):
     finally:
         db.close()
 
-def seed_all(year, force_download):
-    """Executa todos os passos de seeding em sequência, lendo o arquivo uma única vez."""
-    print(f"--- INICIANDO PROCESSO DE SEEDING COMPLETO PARA O ANO {year} ---")
-    df_generator = get_tse_data_generator(year, TSE_CAND_BASE_URL, "consulta_cand", force_download)
-
-    df_list = list(df_generator)
-    if not df_list:
-        print("Nenhum dado encontrado para processar.")
-        return
-    df = pd.concat(df_list, ignore_index=True)
-
-    seed_parties(df.copy())
-    seed_politicians(df.copy())
-    seed_candidacies(df.copy(), year)
-    seed_coalitions(df.copy(), year)
-
-    df_results_generator = get_tse_data_generator(year, TSE_VOTES_BASE_URL, "votacao_candidato_munzona", force_download)
-    update_results(df_results_generator)
-
-    print("\n--- PROCESSO DE SEEDING COMPLETO FINALIZADO ---")
 
 def main():
     """Função principal para analisar os argumentos e chamar a tarefa correta."""
