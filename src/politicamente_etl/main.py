@@ -1,4 +1,4 @@
-# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-07-02 17:09:24
+# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-07-02 17:38:18
 
 import os
 import argparse
@@ -6,7 +6,7 @@ import io
 import zipfile
 import uuid
 import logging
-from datetime import date
+from datetime import date, datetime
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
@@ -16,24 +16,34 @@ from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- CONFIGURAÇÃO ---
-SCRIPT_VERSION = "1.7.0"
+SCRIPT_VERSION = "2.0.0"
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-MAX_WORKERS = int(os.getenv("MAX_WORKERS", 4))
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 TSE_CAND_BASE_URL = "https://cdn.tse.jus.br/estatistica/sead/odsele/consulta_cand"
 TSE_VOTES_BASE_URL = "https://cdn.tse.jus.br/estatistica/sead/odsele/votacao_candidato_munzona"
 DATA_DIR = "data"
+LOG_DIR = "logs"
 BATCH_SIZE = 1000
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", 4))
 
 # --- CONFIGURAÇÃO DE LOGGING ---
 def setup_logging():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - [%(levelname)s] - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
-    )
-    return logging.getLogger(__name__)
+    os.makedirs(LOG_DIR, exist_ok=True)
+    log_filename = f"etl_run_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
+    log_filepath = os.path.join(LOG_DIR, log_filename)
+    logger = logging.getLogger(__name__)
+    logger.setLevel(LOG_LEVEL)
+    if logger.hasHandlers():
+        logger.handlers.clear()
+    file_handler = logging.FileHandler(log_filepath, encoding='utf-8')
+    file_handler.setFormatter(logging.Formatter("%(asctime)s - [%(levelname)s] - %(message)s"))
+    logger.addHandler(file_handler)
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(logging.Formatter("[%(levelname)s] - %(message)s"))
+    logger.addHandler(console_handler)
+    return logger
 
 logger = setup_logging()
 
@@ -41,16 +51,10 @@ if not DATABASE_URL:
     raise ValueError("A variável de ambiente DATABASE_URL não foi definida.")
 
 def get_db_session():
-    """Cria e retorna uma sessão de banco de dados."""
     engine = create_engine(DATABASE_URL)
-    Session = sessionmaker(bind=engine)
-    return Session()
+    return sessionmaker(bind=engine)()
 
-def get_tse_data_generator(year, base_url, file_prefix, force_download=False):
-    """
-    Função geradora que baixa um ZIP e produz DataFrames de cada CSV interno,
-    um de cada vez, para economizar memória.
-    """
+def get_tse_data_as_dataframe(year, base_url, file_prefix, force_download=False):
     os.makedirs(DATA_DIR, exist_ok=True)
     zip_filename = f"{file_prefix}_{year}.zip"
     zip_filepath = os.path.join(DATA_DIR, zip_filename)
@@ -70,35 +74,31 @@ def get_tse_data_generator(year, base_url, file_prefix, force_download=False):
             print(f"Download concluído. Arquivo salvo em: {zip_filepath}")
         except requests.exceptions.RequestException as e:
             logger.error(f"Erro ao baixar o arquivo ZIP: {e}")
-            return
+            return None
     else:
         print(f"Usando arquivo ZIP local já baixado: {zip_filepath}")
 
     try:
         with zipfile.ZipFile(zip_filepath) as z:
             csv_files = [f for f in z.namelist() if f.endswith('.csv')]
-            if not csv_files:
-                raise FileNotFoundError("Nenhum arquivo CSV encontrado no ZIP.")
+            if not csv_files: raise FileNotFoundError("Nenhum arquivo CSV encontrado no ZIP.")
 
             consolidated_file = f"{file_prefix}_{year}_BRASIL.csv"
-            if consolidated_file in csv_files:
-                logger.info(f"Encontrado arquivo consolidado, processando apenas: {consolidated_file}")
-                csv_files = [consolidated_file]
+            csv_to_read = [consolidated_file] if consolidated_file in csv_files else csv_files
 
-            for csv_filename in csv_files:
-                logger.info(f"Lendo arquivo: {csv_filename}")
-                with z.open(csv_filename) as csv_file:
-                    yield pd.read_csv(csv_file, sep=';', encoding='latin-1', low_memory=False)
+            df_list = [pd.read_csv(z.open(f), sep=';', encoding='latin-1', low_memory=False) for f in tqdm(csv_to_read, desc="Lendo arquivos CSV")]
+
+            full_df = pd.concat(df_list, ignore_index=True)
+            print(f"Sucesso! {len(full_df)} registros lidos de {len(csv_to_read)} arquivo(s) CSV.")
+            return full_df
     except Exception as e:
         logger.error(f"Erro ao processar o arquivo: {e}")
-        return
+        return None
 
 def seed_parties(df):
-    """Popula a tabela de partidos a partir de um DataFrame."""
     if df is None: return
     print("🚀 Iniciando a população da tabela de partidos...")
     parties_df = df[['NR_PARTIDO', 'SG_PARTIDO', 'NM_PARTIDO']].drop_duplicates(subset=['NR_PARTIDO'])
-
     db = get_db_session()
     try:
         parties_to_upsert = [{"num": int(row["NR_PARTIDO"]), "init": row["SG_PARTIDO"], "name": row["NM_PARTIDO"]} for _, row in parties_df.iterrows()]
@@ -116,14 +116,12 @@ def seed_parties(df):
         db.close()
 
 def seed_politicians(df):
-    """Popula a tabela de políticos a partir de um DataFrame."""
     if df is None: return
     print("🚀 Iniciando a população da tabela de políticos...")
     politicians_df = df[['NM_CANDIDATO', 'NM_URNA_CANDIDATO']].drop_duplicates()
     db = get_db_session()
     try:
         politicians_to_insert = [{"id": uuid.uuid4(), "name": row["NM_CANDIDATO"], "nick": row["NM_URNA_CANDIDATO"]} for _, row in politicians_df.iterrows()]
-
         with tqdm(total=len(politicians_to_insert), desc="Inserindo Políticos") as pbar:
             for i in range(0, len(politicians_to_insert), BATCH_SIZE):
                 batch = politicians_to_insert[i:i + BATCH_SIZE]
@@ -138,7 +136,6 @@ def seed_politicians(df):
         db.close()
 
 def seed_coalitions(df, year):
-    """Popula as tabelas de coligações e suas associações com partidos."""
     if df is None: return
     print("🚀 Iniciando a população da tabela de coligações...")
 
@@ -185,7 +182,6 @@ def seed_coalitions(df, year):
         db.close()
 
 def seed_candidacies(df, year):
-    """Popula as tabelas de eleições e candidaturas."""
     if df is None: return
     print("🚀 Iniciando a população de eleições e candidaturas...")
 
@@ -197,9 +193,8 @@ def seed_candidacies(df, year):
 
         elections_df = df[['ANO_ELEICAO', 'NR_TURNO', 'DS_ELEICAO']].drop_duplicates()
         for _, row in tqdm(elections_df.iterrows(), total=len(elections_df), desc="Criando Eleições"):
-            turn = int(row['NR_TURNO'])
-            day = 2 if turn == 1 else 30
-            election_date = date(int(row['ANO_ELEICAO']), 10, day)
+            turn, ano = int(row['NR_TURNO']), int(row['ANO_ELEICAO'])
+            election_date = date(ano, 10, 2 if turn == 1 else 30)
             db.execute(text("INSERT INTO elections (election_date, election_type, turn) VALUES (:date, :type, :turn) ON CONFLICT DO NOTHING"),
                        {"date": election_date, "type": row["DS_ELEICAO"], "turn": turn})
         db.commit()
@@ -262,15 +257,17 @@ def update_results(df_generator):
                 batch = updates[i:i + BATCH_SIZE]
                 with db.begin():
                     for item in batch:
-                        db.execute(
+                        result = db.execute(
                             text("UPDATE candidacies SET total_votes_received = :total_votes, status_resultado = :status WHERE sq_candidate_tse = :sq_tse"),
                             item
                         )
+                        if result.rowcount == 0:
+                            logger.warning(f"Nenhuma candidatura encontrada para o SQ_CANDIDATO: {item['sq_tse']}. Nenhum registro foi atualizado.")
                 pbar.update(len(batch))
 
         print("✅ Atualização de resultados concluída.")
     except Exception as e:
-        logger.error(f"❌ Erro ao atualizar os resultados: {e}")
+        logger.error(f"Erro ao atualizar os resultados: {e}")
         db.rollback()
     finally:
         db.close()
@@ -279,12 +276,12 @@ def seed_all(year, force_download):
     """Executa todos os passos de seeding em sequência, lendo o arquivo uma única vez."""
     print(f"--- INICIANDO PROCESSO DE SEEDING COMPLETO PARA O ANO {year} ---")
 
-    cand_generator = get_tse_data_generator(year, TSE_CAND_BASE_URL, "consulta_cand", force_download)
-    df_list = list(cand_generator)
-    if not df_list:
+    df_cand_generator = get_tse_data_generator(year, TSE_CAND_BASE_URL, "consulta_cand", force_download)
+    df_cand_list = list(df_cand_generator)
+    if not df_cand_list:
         print("Nenhum dado de candidatura encontrado para processar.")
         return
-    df_cand = pd.concat(df_list, ignore_index=True)
+    df_cand = pd.concat(df_cand_list, ignore_index=True)
 
     seed_parties(df_cand.copy())
     seed_politicians(df_cand.copy())
@@ -298,7 +295,7 @@ def seed_all(year, force_download):
 
 def main():
     """Função principal para analisar os argumentos e chamar a tarefa correta."""
-    logger.info(f"DomTech Forger - ETL Script v{SCRIPT_VERSION} iniciado.")
+    logger.info(f"PoliticaMente ETL Script v{SCRIPT_VERSION} iniciado.")
     parser = argparse.ArgumentParser(description="Script de ETL para popular o banco de dados do PoliticaMente.")
     subparsers = parser.add_subparsers(dest="command", required=True, help="Comando a ser executado")
 

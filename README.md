@@ -1,4 +1,4 @@
-<!-- Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-07-02 17:09:24 -->
+<!-- Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-07-02 17:38:18 -->
 
 # PoliticaMente ETL
 
@@ -10,6 +10,7 @@ Este é um projeto da organização **politicamente-app**.
 
 * **População de Partidos, Políticos, Coligações e Candidaturas:** Extrai e carrega os dados de arquivos CSV oficiais de candidaturas do TSE de forma paralela e otimizada.
 * **Atualização de Resultados:** Processa os arquivos de votação para atualizar as candidaturas com o total de votos e o status final (eleito, não eleito, etc.).
+* **Logging Estruturado:** Gera um arquivo de log com timestamp para cada execução, facilitando a depuração.
 
 ## Instalação e Uso
 
@@ -36,6 +37,7 @@ Este é um projeto da organização **politicamente-app**.
         ```
         DATABASE_URL="sua_string_de_conexao_aqui"
         MAX_WORKERS=4
+        LOG_LEVEL="INFO"
         ```
 
 ### 2. Como Executar o Script
