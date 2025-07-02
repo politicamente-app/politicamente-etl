@@ -18,9 +18,12 @@ __pycache__/
 data/*.csv
 data/*.zip
 
+# Arquivos de log
+logs/*.log
+
 # Arquivos extras
 *.sql
 *.txt
 
 # --- 
-# Arquivo atualizado pelo DomTech Forger em 2025-07-02 17:38:18
+# Arquivo atualizado pelo DomTech Forger em 2025-07-02 19:06:59
