@@ -1,4 +1,4 @@
-# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-07-02 03:10:44
+# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-07-02 03:32:55
 
 import os
 import argparse
@@ -68,7 +68,6 @@ def get_tse_data_generator(year, base_url, file_prefix, force_download=False):
                 raise FileNotFoundError("Nenhum arquivo CSV encontrado no ZIP.")
 
             for csv_filename in csv_files:
-                print(f"Processando arquivo: {csv_filename}")
                 with z.open(csv_filename) as csv_file:
                     yield pd.read_csv(csv_file, sep=';', encoding='latin-1', low_memory=False)
     except Exception as e:
@@ -83,7 +82,22 @@ def seed_parties(df_generator):
         all_parties = pd.concat([all_parties, df[['NR_PARTIDO', 'SG_PARTIDO', 'NM_PARTIDO']]])
 
     parties_df = all_parties.drop_duplicates(subset=['NR_PARTIDO'])
-    # ... (resto da lógica de inserção em lote) ...
+
+    db = get_db_session()
+    try:
+        parties_to_upsert = [{"num": int(row["NR_PARTIDO"]), "init": row["SG_PARTIDO"], "name": row["NM_PARTIDO"]} for _, row in parties_df.iterrows()]
+        with tqdm(total=len(parties_to_upsert), desc="Processando Partidos") as pbar:
+            for i in range(0, len(parties_to_upsert), BATCH_SIZE):
+                batch = parties_to_upsert[i:i + BATCH_SIZE]
+                db.execute(text("INSERT INTO parties (party_number, initials, party_name) VALUES (:num, :init, :name) ON CONFLICT (party_number) DO UPDATE SET initials = :init, party_name = :name"), batch)
+                db.commit()
+                pbar.update(len(batch))
+        print("✅ População de partidos concluída.")
+    except Exception as e:
+        print(f"❌ Erro ao popular a tabela de partidos: {e}")
+        db.rollback()
+    finally:
+        db.close()
 
 def update_results(df_generator):
     """Atualiza a tabela de candidaturas com os resultados da votação."""
@@ -92,7 +106,7 @@ def update_results(df_generator):
     aggregated_results = {}
 
     for df in df_generator:
-        for _, row in tqdm(df.iterrows(), total=len(df), desc="Agregando votos do arquivo", leave=False):
+        for _, row in tqdm(df.iterrows(), total=len(df), desc=f"Agregando votos de {row['SG_UF'][0]}", leave=False):
             key = (int(row['ANO_ELEICAO']), int(row['NR_TURNO']), row['DS_CARGO'], int(row['NR_VOTAVEL']))
             if key not in aggregated_results:
                 aggregated_results[key] = {
@@ -116,17 +130,23 @@ def update_results(df_generator):
         with tqdm(total=len(updates), desc="Atualizando Resultados no DB") as pbar:
             for i in range(0, len(updates), BATCH_SIZE):
                 batch = updates[i:i + BATCH_SIZE]
-                for item in batch:
-                    db.execute(
-                        text("""
-                            UPDATE candidacies SET
-                                total_votes_received = :total_votes, status_resultado = :status
-                            WHERE electoral_number = :electoral_number AND office = :office
-                            AND election_id IN (SELECT election_id FROM elections WHERE date_part('year', election_date) = :year AND turn = :turn LIMIT 1)
-                        """),
-                        item
-                    )
-                db.commit()
+                # Usamos uma transação para cada lote
+                with db.begin():
+                    for item in batch:
+                        db.execute(
+                            text("""
+                                UPDATE candidacies SET
+                                    total_votes_received = :total_votes,
+                                    status_resultado = :status
+                                WHERE electoral_number = :electoral_number
+                                AND office = :office
+                                AND election_id IN (
+                                    SELECT election_id FROM elections
+                                    WHERE date_part('year', election_date) = :year AND turn = :turn
+                                )
+                            """),
+                            item
+                        )
                 pbar.update(len(batch))
 
         print("✅ Atualização de resultados concluída.")
@@ -135,8 +155,6 @@ def update_results(df_generator):
         db.rollback()
     finally:
         db.close()
-
-# ... (As outras funções de seeding e a main() precisam ser ajustadas para usar o gerador) ...
 
 def main():
     """Função principal para analisar os argumentos e chamar a tarefa correta."""
@@ -160,4 +178,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
