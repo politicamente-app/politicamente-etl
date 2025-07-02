@@ -1,4 +1,4 @@
-# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-07-02 04:14:54
+# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-07-02 04:23:08
 
 import os
 import argparse
@@ -63,6 +63,13 @@ def get_tse_data_generator(year, base_url, file_prefix, force_download=False):
 
     try:
         with zipfile.ZipFile(zip_filepath) as z:
+            consolidated_file = f"{file_prefix}_{year}_BRASIL.csv"
+            if consolidated_file in z.namelist():
+                print(f"Encontrado arquivo consolidado: {consolidated_file}")
+                with z.open(consolidated_file) as csv_file:
+                    yield pd.read_csv(csv_file, sep=';', encoding='latin-1', low_memory=False)
+                return
+
             csv_files = [f for f in z.namelist() if f.endswith('.csv')]
             if not csv_files:
                 raise FileNotFoundError("Nenhum arquivo CSV encontrado no ZIP.")
@@ -188,16 +195,20 @@ def seed_candidacies(df_generator, year):
         parties_cache = {row.party_number: row.party_id for row in db.execute(text("SELECT party_id, party_number FROM parties")).all()}
         politicians_cache = {f'{p.full_name}-{p.nickname}': p.politician_id for p in db.execute(text("SELECT politician_id, full_name, nickname FROM politicians")).all()}
 
+        # Cria as eleições primeiro
+        elections_df_list = []
         for df in df_generator:
-            elections_df = df[['ANO_ELEICAO', 'NR_TURNO', 'DS_ELEICAO']].drop_duplicates()
-            for _, row in tqdm(elections_df.iterrows(), total=len(elections_df), desc="Criando Eleições"):
-                turn = int(row['NR_TURNO'])
-                day = 2 if turn == 1 else 30
-                election_date = date(int(row['ANO_ELEICAO']), 10, day)
-                db.execute(text("INSERT INTO elections (election_date, election_type, turn) VALUES (:date, :type, :turn) ON CONFLICT DO NOTHING"),
-                           {"date": election_date, "type": row["DS_ELEICAO"], "turn": turn})
-            db.commit()
+            elections_df_list.append(df[['ANO_ELEICAO', 'NR_TURNO', 'DS_ELEICAO']])
 
+        elections_df = pd.concat(elections_df_list).drop_duplicates()
+
+        for _, row in tqdm(elections_df.iterrows(), total=len(elections_df), desc="Criando Eleições"):
+            turn = int(row['NR_TURNO'])
+            day = 2 if turn == 1 else 30
+            election_date = date(int(row['ANO_ELEICAO']), 10, day)
+            db.execute(text("INSERT INTO elections (election_date, election_type, turn) VALUES (:date, :type, :turn) ON CONFLICT DO NOTHING"),
+                       {"date": election_date, "type": row["DS_ELEICAO"], "turn": turn})
+        db.commit()
         elections_cache = {f"{int(e.date_part)}-{e.turn}-{e.election_type}": e.election_id for e in db.execute(text("SELECT election_id, date_part('year', election_date) as date_part, turn, election_type FROM elections")).all()}
 
         print(f"Iniciando processamento de candidaturas...")
@@ -215,7 +226,7 @@ def seed_candidacies(df_generator, year):
                     candidacies_to_insert.append({
                         "p_id": politician_id, "party_id": party_id, "e_id": election_id,
                         "office": row["DS_CARGO"], "num": int(row["NR_CANDIDATO"]),
-                        "sq_tse": row["SQ_CANDIDATO"]
+                        "sq_tse": str(row["SQ_CANDIDATO"])
                     })
 
             with tqdm(total=len(candidacies_to_insert), desc="Inserindo Candidaturas") as pbar:
@@ -274,7 +285,6 @@ def update_results(df_generator):
         db.rollback()
     finally:
         db.close()
-
 
 def main():
     """Função principal para analisar os argumentos e chamar a tarefa correta."""
