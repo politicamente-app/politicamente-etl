@@ -1,4 +1,4 @@
-<!-- Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-07-02 17:38:18 -->
+<!-- Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-07-02 20:38:26 -->
 
 # PoliticaMente ETL
 
@@ -33,27 +33,26 @@ Este é um projeto da organização **politicamente-app**.
     ```
 3.  **Crie e configure o arquivo `.env`:**
     * Crie um arquivo chamado `.env` na pasta raiz do projeto.
-    * Dentro dele, adicione a string de conexão do seu banco de dados e a configuração de paralelismo:
+    * Dentro dele, adicione a string de conexão do seu banco de dados e a configuração de paralelismo e logging:
         ```
         DATABASE_URL="sua_string_de_conexao_aqui"
         MAX_WORKERS=4
         LOG_LEVEL="INFO"
         ```
+    * Para depuração, mude `LOG_LEVEL` para `"DEBUG"`.
 
 ### 2. Como Executar o Script
 
-O script agora tem um comando principal que executa todas as etapas de seeding de uma vez, além dos comandos individuais.
+O script agora tem comandos específicos para cada tarefa. **É recomendado executar os comandos nesta ordem:**
 
-* **Para popular o banco com todos os dados de uma eleição (Recomendado):**
+1.  **Popular o banco com todos os dados de uma eleição (Recomendado):**
     ```sh
-    python src/politicamente_etl/main.py seed_all --year 2022
+    python -m src.politicamente_etl.main seed_all --year 2022
     ```
 
-* **Para executar etapas individuais (para depuração):**
+2.  **Para executar etapas individuais (para depuração):**
     ```sh
-    python src/politicamente_etl/main.py seed_parties --year 2022
-    python src/politicamente_etl/main.py seed_politicians --year 2022
-    python src/politicamente_etl/main.py seed_coalitions --year 2022
-    python src/politicamente_etl/main.py seed_candidacies --year 2022
-    python src/politicamente_etl/main.py update_results --year 2022
+    python -m src.politicamente_etl.main seed_parties --year 2022
+    python -m src.politicamente_etl.main seed_politicians --year 2022
+    # etc...
     ```
