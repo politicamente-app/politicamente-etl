@@ -1,4 +1,4 @@
-# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-07-02 03:32:55
+# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-07-02 03:46:53
 
 import os
 import argparse
@@ -99,14 +99,42 @@ def seed_parties(df_generator):
     finally:
         db.close()
 
+def seed_politicians(df_generator):
+    """Popula a tabela de políticos a partir de um gerador de DataFrames."""
+    if df_generator is None: return
+    print("🚀 Iniciando a população da tabela de políticos...")
+
+    all_politicians = pd.DataFrame()
+    for df in tqdm(df_generator, desc="Lendo arquivos de dados"):
+        all_politicians = pd.concat([all_politicians, df[['NM_CANDIDATO', 'NM_URNA_CANDIDATO']]])
+
+    politicians_df = all_politicians.drop_duplicates()
+    db = get_db_session()
+    try:
+        politicians_to_insert = [{"id": uuid.uuid4(), "name": row["NM_CANDIDATO"], "nick": row["NM_URNA_CANDIDATO"]} for _, row in politicians_df.iterrows()]
+
+        with tqdm(total=len(politicians_to_insert), desc="Inserindo Políticos") as pbar:
+            for i in range(0, len(politicians_to_insert), BATCH_SIZE):
+                batch = politicians_to_insert[i:i + BATCH_SIZE]
+                db.execute(text("INSERT INTO politicians (politician_id, full_name, nickname) VALUES (:id, :name, :nick) ON CONFLICT (full_name, nickname) DO NOTHING"), batch)
+                db.commit()
+                pbar.update(len(batch))
+        print("✅ População de políticos concluída.")
+    except Exception as e:
+        print(f"❌ Erro ao popular a tabela de políticos: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
 def update_results(df_generator):
     """Atualiza a tabela de candidaturas com os resultados da votação."""
     print("🚀 Iniciando a atualização dos resultados das candidaturas...")
 
     aggregated_results = {}
 
-    for df in df_generator:
-        for _, row in tqdm(df.iterrows(), total=len(df), desc=f"Agregando votos de {row['SG_UF'][0]}", leave=False):
+    # CORREÇÃO: A barra de progresso agora itera sobre o gerador, não sobre o DataFrame
+    for df in tqdm(df_generator, desc="Processando arquivos de votação"):
+        for _, row in df.iterrows():
             key = (int(row['ANO_ELEICAO']), int(row['NR_TURNO']), row['DS_CARGO'], int(row['NR_VOTAVEL']))
             if key not in aggregated_results:
                 aggregated_results[key] = {
@@ -119,18 +147,13 @@ def update_results(df_generator):
 
     db = get_db_session()
     try:
-        updates = []
-        for key, value in aggregated_results.items():
-            updates.append({
-                "year": key[0], "turn": key[1], "office": key[2],
-                "electoral_number": key[3], "total_votes": value["total_votes"],
-                "status": value["status"]
-            })
+        updates = [{"year": key[0], "turn": key[1], "office": key[2],
+                    "electoral_number": key[3], "total_votes": value["total_votes"],
+                    "status": value["status"]} for key, value in aggregated_results.items()]
 
         with tqdm(total=len(updates), desc="Atualizando Resultados no DB") as pbar:
             for i in range(0, len(updates), BATCH_SIZE):
                 batch = updates[i:i + BATCH_SIZE]
-                # Usamos uma transação para cada lote
                 with db.begin():
                     for item in batch:
                         db.execute(
@@ -167,6 +190,9 @@ def main():
 
     parser_parties = subparsers.add_parser("seed_parties", help="Popula a tabela de partidos.", parents=[base_parser])
     parser_parties.set_defaults(func=lambda args: seed_parties(get_tse_data_generator(args.year, TSE_CAND_BASE_URL, "consulta_cand", args.force_download)))
+
+    parser_politicians = subparsers.add_parser("seed_politicians", help="Popula a tabela de políticos.", parents=[base_parser])
+    parser_politicians.set_defaults(func=lambda args: seed_politicians(get_tse_data_generator(args.year, TSE_CAND_BASE_URL, "consulta_cand", args.force_download)))
 
     # ... (outros parsers) ...
 
