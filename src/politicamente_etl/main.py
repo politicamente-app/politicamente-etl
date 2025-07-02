@@ -1,4 +1,4 @@
-# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-07-02 01:15:35
+# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-07-02 01:27:23
 
 import os
 import argparse
@@ -47,8 +47,11 @@ def get_tse_data(year, base_url, file_prefix, force_download=False):
             response = requests.get(zip_url, stream=True)
             response.raise_for_status()
             with open(zip_filepath, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
+                total_size = int(response.headers.get('content-length', 0))
+                with tqdm(total=total_size, unit='iB', unit_scale=True, desc=zip_filename) as pbar:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        pbar.update(len(chunk))
+                        f.write(chunk)
             print(f"Download concluído. Arquivo salvo em: {zip_filepath}")
         except requests.exceptions.RequestException as e:
             print(f"❌ Erro ao baixar o arquivo ZIP: {e}")
@@ -113,7 +116,7 @@ def seed_politicians(df):
         db.close()
 
 def seed_coalitions(df, year):
-    """Popula as tabelas de coligações e suas associações com partidos."""
+    """Popula a tabela de coligações e suas associações com partidos."""
     if df is None: return
     print("🚀 Iniciando a população da tabela de coligações...")
 
@@ -161,7 +164,55 @@ def seed_coalitions(df, year):
 
 def seed_candidacies(df, year):
     """Popula as tabelas de eleições e candidaturas."""
-    # ... (código mantido da versão anterior) ...
+    if df is None: return
+    print("🚀 Iniciando a população de eleições e candidaturas...")
+
+    db = get_db_session()
+    try:
+        print("   Pré-carregando caches de dados...")
+        parties_cache = {row.party_number: row.party_id for row in db.execute(text("SELECT party_id, party_number FROM parties")).all()}
+        politicians_cache = {f'{p.full_name}-{p.nickname}': p.politician_id for p in db.execute(text("SELECT politician_id, full_name, nickname FROM politicians")).all()}
+
+        elections_df = df[['ANO_ELEICAO', 'NR_TURNO', 'DS_ELEICAO']].drop_duplicates()
+        for _, row in tqdm(elections_df.iterrows(), total=len(elections_df), desc="Criando Eleições"):
+            turn = int(row['NR_TURNO'])
+            day = 2 if turn == 1 else 30
+            election_date = date(int(row['ANO_ELEICAO']), 10, day)
+            db.execute(text("INSERT INTO elections (election_date, election_type, turn) VALUES (:date, :type, :turn) ON CONFLICT DO NOTHING"),
+                       {"date": election_date, "type": row["DS_ELEICAO"], "turn": turn})
+        db.commit()
+        elections_cache = {f"{int(e.date_part)}-{e.turn}-{e.election_type}": e.election_id for e in db.execute(text("SELECT election_id, date_part('year', election_date) as date_part, turn, election_type FROM elections")).all()}
+
+        candidacies_to_insert = []
+        for _, row in df.iterrows():
+            election_key = f"{row['ANO_ELEICAO']}-{row['NR_TURNO']}-{row['DS_ELEICAO']}"
+            politician_key = f'{row["NM_CANDIDATO"]}-{row["NM_URNA_CANDIDATO"]}'
+
+            election_id = elections_cache.get(election_key)
+            politician_id = politicians_cache.get(politician_key)
+            party_id = parties_cache.get(int(row["NR_PARTIDO"]))
+
+            if party_id and election_id and politician_id:
+                candidacies_to_insert.append({
+                    "p_id": politician_id, "party_id": party_id, "e_id": election_id,
+                    "office": row["DS_CARGO"], "num": int(row["NR_CANDIDATO"])
+                })
+
+        with tqdm(total=len(candidacies_to_insert), desc="Inserindo Candidaturas") as pbar:
+            for i in range(0, len(candidacies_to_insert), BATCH_SIZE):
+                batch = candidacies_to_insert[i:i + BATCH_SIZE]
+                db.execute(
+                    text("INSERT INTO candidacies (politician_id, party_id, election_id, office, electoral_number) VALUES (:p_id, :party_id, :e_id, :office, :num) ON CONFLICT DO NOTHING"),
+                    batch
+                )
+                db.commit()
+                pbar.update(len(batch))
+
+        print(f"✅ Concluído! Processamento de candidaturas finalizado.")
+    except Exception as e:
+        print(f"❌ Erro durante o seeding de candidaturas: {e}")
+    finally:
+        db.close()
 
 def update_results(df):
     """Atualiza a tabela de candidaturas com os resultados da votação."""
@@ -174,10 +225,10 @@ def update_results(df):
     try:
         updates = [{"electoral_number": int(row["SQ_CANDIDATO"]), "total_votes": int(row["QT_VOTOS_NOMINAIS"])} for _, row in results_df.iterrows()]
 
-        print(f"Atualizando {len(updates)} candidaturas...")
         with tqdm(total=len(updates), desc="Atualizando Resultados") as pbar:
             for i in range(0, len(updates), BATCH_SIZE):
                 batch = updates[i:i + BATCH_SIZE]
+                # Esta abordagem de update individual é menos eficiente, mas mais segura para evitar locks complexos.
                 for item in batch:
                     db.execute(
                         text("UPDATE candidacies SET total_votos_recebidos = :total_votes WHERE electoral_number = :electoral_number"),
@@ -197,16 +248,17 @@ def update_results(df):
 def main():
     """Função principal para analisar os argumentos e chamar a tarefa correta."""
     parser = argparse.ArgumentParser(description="Script de ETL para popular o banco de dados do PoliticaMente.")
+
     subparsers = parser.add_subparsers(dest="command", required=True, help="Comando a ser executado")
 
     base_parser = argparse.ArgumentParser(add_help=False)
-    base_parser.add_argument("--year", type=int, default=date.today().year, help="Ano da eleição.")
-    base_parser.add_argument("--force-download", action='store_true')
+    base_parser.add_argument("--year", type=int, default=date.today().year, help="Ano da eleição para buscar os dados.")
+    base_parser.add_argument("--force-download", action='store_true', help="Força um novo download do arquivo do TSE.")
 
-    parser_parties = subparsers.add_parser("seed_parties", help="Popula APENAS a tabela de partidos.", parents=[base_parser])
+    parser_parties = subparsers.add_parser("seed_parties", help="Popula a tabela de partidos políticos.", parents=[base_parser])
     parser_parties.set_defaults(func=lambda args: seed_parties(get_tse_data(args.year, TSE_CAND_BASE_URL, "consulta_cand", args.force_download)))
 
-    parser_politicians = subparsers.add_parser("seed_politicians", help="Popula APENAS a tabela de políticos.", parents=[base_parser])
+    parser_politicians = subparsers.add_parser("seed_politicians", help="Popula a tabela de políticos.", parents=[base_parser])
     parser_politicians.set_defaults(func=lambda args: seed_politicians(get_tse_data(args.year, TSE_CAND_BASE_URL, "consulta_cand", args.force_download)))
 
     parser_coalitions = subparsers.add_parser("seed_coalitions", help="Popula a tabela de coligações.", parents=[base_parser])
@@ -215,7 +267,7 @@ def main():
     parser_candidacies = subparsers.add_parser("seed_candidacies", help="Popula a tabela de candidaturas.", parents=[base_parser])
     parser_candidacies.set_defaults(func=lambda args: seed_candidacies(get_tse_data(args.year, TSE_CAND_BASE_URL, "consulta_cand", args.force_download), args.year))
 
-    parser_results = subparsers.add_parser("update_results", help="Atualiza os resultados (votos) das candidaturas.", parents=[base_parser])
+    parser_results = subparsers.add_parser("update_results", help="Atualiza os resultados de votação das candidaturas.", parents=[base_parser])
     parser_results.set_defaults(func=lambda args: update_results(get_tse_data(args.year, TSE_VOTES_BASE_URL, "votacao_candidato_munzona", args.force_download)))
 
     args = parser.parse_args()
