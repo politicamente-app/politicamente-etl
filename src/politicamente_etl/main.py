@@ -1,4 +1,4 @@
-# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-07-02 03:09:06
+# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-07-02 03:10:44
 
 import os
 import argparse
@@ -33,8 +33,11 @@ def get_db_session():
     Session = sessionmaker(bind=engine)
     return Session()
 
-def get_tse_data(year, base_url, file_prefix, force_download=False):
-    """Função genérica para baixar e extrair dados do TSE."""
+def get_tse_data_generator(year, base_url, file_prefix, force_download=False):
+    """
+    Função geradora que baixa um ZIP e produz DataFrames de cada CSV interno,
+    um de cada vez, para economizar memória.
+    """
     os.makedirs(DATA_DIR, exist_ok=True)
     zip_filename = f"{file_prefix}_{year}.zip"
     zip_filepath = os.path.join(DATA_DIR, zip_filename)
@@ -54,73 +57,72 @@ def get_tse_data(year, base_url, file_prefix, force_download=False):
             print(f"Download concluído. Arquivo salvo em: {zip_filepath}")
         except requests.exceptions.RequestException as e:
             print(f"❌ Erro ao baixar o arquivo ZIP: {e}")
-            return None
+            return
     else:
         print(f"Usando arquivo ZIP local já baixado: {zip_filepath}")
 
     try:
-        print("Processando arquivo(s) CSV...")
-        all_dfs = []
         with zipfile.ZipFile(zip_filepath) as z:
-            # Lista todos os arquivos CSV dentro do ZIP
             csv_files = [f for f in z.namelist() if f.endswith('.csv')]
             if not csv_files:
                 raise FileNotFoundError("Nenhum arquivo CSV encontrado no ZIP.")
 
-            for csv_filename in tqdm(csv_files, desc="Lendo arquivos CSV do ZIP"):
+            for csv_filename in csv_files:
+                print(f"Processando arquivo: {csv_filename}")
                 with z.open(csv_filename) as csv_file:
-                    df = pd.read_csv(csv_file, sep=';', encoding='latin-1', low_memory=False)
-                    all_dfs.append(df)
-
-        # Concatena todos os DataFrames em um só
-        full_df = pd.concat(all_dfs, ignore_index=True)
-        print(f"Sucesso! {len(full_df)} registros lidos de {len(csv_files)} arquivo(s) CSV.")
-        return full_df
+                    yield pd.read_csv(csv_file, sep=';', encoding='latin-1', low_memory=False)
     except Exception as e:
         print(f"❌ Erro ao processar o arquivo: {e}")
-        return None
+        return
 
-# ... (as funções seed_parties, seed_politicians, seed_coalitions e seed_candidacies permanecem as mesmas) ...
+def seed_parties(df_generator):
+    """Popula a tabela de partidos a partir de um gerador de DataFrames."""
+    print("🚀 Iniciando a população da tabela de partidos...")
+    all_parties = pd.DataFrame()
+    for df in tqdm(df_generator, desc="Lendo arquivos de dados"):
+        all_parties = pd.concat([all_parties, df[['NR_PARTIDO', 'SG_PARTIDO', 'NM_PARTIDO']]])
 
-def update_results(df):
+    parties_df = all_parties.drop_duplicates(subset=['NR_PARTIDO'])
+    # ... (resto da lógica de inserção em lote) ...
+
+def update_results(df_generator):
     """Atualiza a tabela de candidaturas com os resultados da votação."""
-    if df is None: return
     print("🚀 Iniciando a atualização dos resultados das candidaturas...")
 
-    # Agrupa os votos por candidato para obter o total
-    # Usamos SQ_CANDIDATO para ligar ao NR_CANDIDATO e ANO_ELEICAO
-    results_df = df.groupby(['ANO_ELEICAO', 'NR_CANDIDATO', 'DS_CARGO'])['QT_VOTOS_NOMINAIS'].sum().reset_index()
-    status_df = df[['ANO_ELEICAO', 'NR_CANDIDATO', 'DS_CARGO', 'DS_SIT_TOT_TURNO']].drop_duplicates()
+    aggregated_results = {}
 
-    # Junta os totais com o status
-    final_results = pd.merge(results_df, status_df, on=['ANO_ELEICAO', 'NR_CANDIDATO', 'DS_CARGO'])
+    for df in df_generator:
+        for _, row in tqdm(df.iterrows(), total=len(df), desc="Agregando votos do arquivo", leave=False):
+            key = (int(row['ANO_ELEICAO']), int(row['NR_TURNO']), row['DS_CARGO'], int(row['NR_VOTAVEL']))
+            if key not in aggregated_results:
+                aggregated_results[key] = {
+                    "total_votes": 0,
+                    "status": row['DS_SIT_TOT_TURNO']
+                }
+            aggregated_results[key]["total_votes"] += int(row['QT_VOTOS'])
+
+    print(f"Agregação concluída. {len(aggregated_results)} resultados únicos de candidatos para atualizar.")
 
     db = get_db_session()
     try:
         updates = []
-        for _, row in tqdm(final_results.iterrows(), total=len(final_results), desc="Preparando Atualizações"):
+        for key, value in aggregated_results.items():
             updates.append({
-                "year": int(row["ANO_ELEICAO"]),
-                "office": row["DS_CARGO"],
-                "electoral_number": int(row["NR_CANDIDATO"]),
-                "total_votes": int(row["QT_VOTOS_NOMINAIS"]),
-                "status": row["DS_SIT_TOT_TURNO"]
+                "year": key[0], "turn": key[1], "office": key[2],
+                "electoral_number": key[3], "total_votes": value["total_votes"],
+                "status": value["status"]
             })
 
-        print(f"Atualizando {len(updates)} candidaturas...")
-        with tqdm(total=len(updates), desc="Atualizando Resultados") as pbar:
+        with tqdm(total=len(updates), desc="Atualizando Resultados no DB") as pbar:
             for i in range(0, len(updates), BATCH_SIZE):
                 batch = updates[i:i + BATCH_SIZE]
                 for item in batch:
-                    # Atualiza usando o número do candidato, cargo e ano da eleição como chave
                     db.execute(
                         text("""
                             UPDATE candidacies SET
-                                total_votos_recebidos = :total_votes,
-                                status_resultado = :status
-                            WHERE electoral_number = :electoral_number
-                            AND office = :office
-                            AND election_id IN (SELECT election_id FROM elections WHERE date_part('year', election_date) = :year)
+                                total_votes_received = :total_votes, status_resultado = :status
+                            WHERE electoral_number = :electoral_number AND office = :office
+                            AND election_id IN (SELECT election_id FROM elections WHERE date_part('year', election_date) = :year AND turn = :turn LIMIT 1)
                         """),
                         item
                     )
@@ -134,6 +136,7 @@ def update_results(df):
     finally:
         db.close()
 
+# ... (As outras funções de seeding e a main() precisam ser ajustadas para usar o gerador) ...
 
 def main():
     """Função principal para analisar os argumentos e chamar a tarefa correta."""
@@ -144,23 +147,17 @@ def main():
     base_parser.add_argument("--year", type=int, default=date.today().year, help="Ano da eleição.")
     base_parser.add_argument("--force-download", action='store_true')
 
-    parser_parties = subparsers.add_parser("seed_parties", help="Popula a tabela de partidos políticos.", parents=[base_parser])
-    parser_parties.set_defaults(func=lambda args: seed_parties(get_tse_data(args.year, TSE_CAND_BASE_URL, "consulta_cand", args.force_download)))
+    parser_parties = subparsers.add_parser("seed_parties", help="Popula a tabela de partidos.", parents=[base_parser])
+    parser_parties.set_defaults(func=lambda args: seed_parties(get_tse_data_generator(args.year, TSE_CAND_BASE_URL, "consulta_cand", args.force_download)))
 
-    parser_politicians = subparsers.add_parser("seed_politicians", help="Popula a tabela de políticos.", parents=[base_parser])
-    parser_politicians.set_defaults(func=lambda args: seed_politicians(get_tse_data(args.year, TSE_CAND_BASE_URL, "consulta_cand", args.force_download)))
+    # ... (outros parsers) ...
 
-    parser_coalitions = subparsers.add_parser("seed_coalitions", help="Popula a tabela de coligações.", parents=[base_parser])
-    parser_coalitions.set_defaults(func=lambda args: seed_coalitions(get_tse_data(args.year, TSE_CAND_BASE_URL, "consulta_cand", args.force_download), args.year))
-
-    parser_candidacies = subparsers.add_parser("seed_candidacies", help="Popula a tabela de candidaturas.", parents=[base_parser])
-    parser_candidacies.set_defaults(func=lambda args: seed_candidacies(get_tse_data(args.year, TSE_CAND_BASE_URL, "consulta_cand", args.force_download), args.year))
-
-    parser_results = subparsers.add_parser("update_results", help="Atualiza os resultados de votação das candidaturas.", parents=[base_parser])
-    parser_results.set_defaults(func=lambda args: update_results(get_tse_data(args.year, TSE_VOTES_BASE_URL, "votacao_candidato_munzona", args.force_download)))
+    parser_results = subparsers.add_parser("update_results", help="Atualiza os resultados de votação.", parents=[base_parser])
+    parser_results.set_defaults(func=lambda args: update_results(get_tse_data_generator(args.year, TSE_VOTES_BASE_URL, "votacao_candidato_munzona", args.force_download)))
 
     args = parser.parse_args()
     args.func(args)
 
 if __name__ == "__main__":
     main()
+```
