@@ -1,4 +1,4 @@
-# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-07-02 03:46:53
+# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-07-02 04:00:54
 
 import os
 import argparse
@@ -126,16 +126,73 @@ def seed_politicians(df_generator):
     finally:
         db.close()
 
+def seed_candidacies(df_generator, year):
+    """Popula as tabelas de eleições e candidaturas."""
+    if df_generator is None: return
+    print("🚀 Iniciando a população de eleições e candidaturas...")
+
+    db = get_db_session()
+    try:
+        print("   Pré-carregando caches de dados...")
+        parties_cache = {row.party_number: row.party_id for row in db.execute(text("SELECT party_id, party_number FROM parties")).all()}
+        politicians_cache = {f'{p.full_name}-{p.nickname}': p.politician_id for p in db.execute(text("SELECT politician_id, full_name, nickname FROM politicians")).all()}
+
+        for df in df_generator:
+            elections_df = df[['ANO_ELEICAO', 'NR_TURNO', 'DS_ELEICAO']].drop_duplicates()
+            for _, row in tqdm(elections_df.iterrows(), total=len(elections_df), desc="Criando Eleições"):
+                turn = int(row['NR_TURNO'])
+                day = 2 if turn == 1 else 30
+                election_date = date(int(row['ANO_ELEICAO']), 10, day)
+                db.execute(text("INSERT INTO elections (election_date, election_type, turn) VALUES (:date, :type, :turn) ON CONFLICT DO NOTHING"),
+                           {"date": election_date, "type": row["DS_ELEICAO"], "turn": turn})
+            db.commit()
+
+        elections_cache = {f"{int(e.date_part)}-{e.turn}-{e.election_type}": e.election_id for e in db.execute(text("SELECT election_id, date_part('year', election_date) as date_part, turn, election_type FROM elections")).all()}
+
+        print(f"Iniciando processamento de candidaturas...")
+        for df in get_tse_data_generator(year, TSE_CAND_BASE_URL, "consulta_cand"):
+            candidacies_to_insert = []
+            for _, row in df.iterrows():
+                election_key = f"{row['ANO_ELEICAO']}-{row['NR_TURNO']}-{row['DS_ELEICAO']}"
+                politician_key = f'{row["NM_CANDIDATO"]}-{row["NM_URNA_CANDIDATO"]}'
+
+                election_id = elections_cache.get(election_key)
+                politician_id = politicians_cache.get(politician_key)
+                party_id = parties_cache.get(int(row["NR_PARTIDO"]))
+
+                if party_id and election_id and politician_id:
+                    candidacies_to_insert.append({
+                        "p_id": politician_id, "party_id": party_id, "e_id": election_id,
+                        "office": row["DS_CARGO"], "num": int(row["NR_CANDIDATO"]),
+                        "sq_tse": row["SQ_CANDIDATO"]
+                    })
+
+            with tqdm(total=len(candidacies_to_insert), desc="Inserindo Candidaturas") as pbar:
+                for i in range(0, len(candidacies_to_insert), BATCH_SIZE):
+                    batch = candidacies_to_insert[i:i + BATCH_SIZE]
+                    db.execute(
+                        text("INSERT INTO candidacies (politician_id, party_id, election_id, office, electoral_number, sq_candidate_tse) VALUES (:p_id, :party_id, :e_id, :office, :num, :sq_tse) ON CONFLICT DO NOTHING"),
+                        batch
+                    )
+                    db.commit()
+                    pbar.update(len(batch))
+
+        print(f"✅ Concluído! Processamento de candidaturas finalizado.")
+    except Exception as e:
+        print(f"❌ Erro durante o seeding de candidaturas: {e}")
+    finally:
+        db.close()
+
 def update_results(df_generator):
     """Atualiza a tabela de candidaturas com os resultados da votação."""
+    if df_generator is None: return
     print("🚀 Iniciando a atualização dos resultados das candidaturas...")
 
     aggregated_results = {}
 
-    # CORREÇÃO: A barra de progresso agora itera sobre o gerador, não sobre o DataFrame
-    for df in tqdm(df_generator, desc="Processando arquivos de votação"):
-        for _, row in df.iterrows():
-            key = (int(row['ANO_ELEICAO']), int(row['NR_TURNO']), row['DS_CARGO'], int(row['NR_VOTAVEL']))
+    for df in df_generator:
+        for _, row in tqdm(df.iterrows(), total=len(df), desc=f"Agregando votos de {row['SG_UF'].iloc[0]}", leave=False):
+            key = str(row['SQ_CANDIDATO']) # Usar o sequencial do candidato como chave
             if key not in aggregated_results:
                 aggregated_results[key] = {
                     "total_votes": 0,
@@ -147,9 +204,7 @@ def update_results(df_generator):
 
     db = get_db_session()
     try:
-        updates = [{"year": key[0], "turn": key[1], "office": key[2],
-                    "electoral_number": key[3], "total_votes": value["total_votes"],
-                    "status": value["status"]} for key, value in aggregated_results.items()]
+        updates = [{"sq_tse": key, "total_votes": value["total_votes"], "status": value["status"]} for key, value in aggregated_results.items()]
 
         with tqdm(total=len(updates), desc="Atualizando Resultados no DB") as pbar:
             for i in range(0, len(updates), BATCH_SIZE):
@@ -157,17 +212,7 @@ def update_results(df_generator):
                 with db.begin():
                     for item in batch:
                         db.execute(
-                            text("""
-                                UPDATE candidacies SET
-                                    total_votes_received = :total_votes,
-                                    status_resultado = :status
-                                WHERE electoral_number = :electoral_number
-                                AND office = :office
-                                AND election_id IN (
-                                    SELECT election_id FROM elections
-                                    WHERE date_part('year', election_date) = :year AND turn = :turn
-                                )
-                            """),
+                            text("UPDATE candidacies SET total_votes_received = :total_votes, status_resultado = :status WHERE sq_candidate_tse = :sq_tse"),
                             item
                         )
                 pbar.update(len(batch))
@@ -194,7 +239,8 @@ def main():
     parser_politicians = subparsers.add_parser("seed_politicians", help="Popula a tabela de políticos.", parents=[base_parser])
     parser_politicians.set_defaults(func=lambda args: seed_politicians(get_tse_data_generator(args.year, TSE_CAND_BASE_URL, "consulta_cand", args.force_download)))
 
-    # ... (outros parsers) ...
+    parser_candidacies = subparsers.add_parser("seed_candidacies", help="Popula a tabela de candidaturas.", parents=[base_parser])
+    parser_candidacies.set_defaults(func=lambda args: seed_candidacies(get_tse_data_generator(args.year, TSE_CAND_BASE_URL, "consulta_cand", args.force_download), args.year))
 
     parser_results = subparsers.add_parser("update_results", help="Atualiza os resultados de votação.", parents=[base_parser])
     parser_results.set_defaults(func=lambda args: update_results(get_tse_data_generator(args.year, TSE_VOTES_BASE_URL, "votacao_candidato_munzona", args.force_download)))
