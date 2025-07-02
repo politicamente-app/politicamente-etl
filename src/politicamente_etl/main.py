@@ -1,4 +1,4 @@
-# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-07-02 04:23:08
+# Este arquivo foi gerado/atualizado pelo DomTech Forger em 2025-07-02 04:38:52
 
 import os
 import argparse
@@ -81,14 +81,11 @@ def get_tse_data_generator(year, base_url, file_prefix, force_download=False):
         print(f"❌ Erro ao processar o arquivo: {e}")
         return
 
-def seed_parties(df_generator):
-    """Popula a tabela de partidos a partir de um gerador de DataFrames."""
+def seed_parties(df):
+    """Popula a tabela de partidos a partir de um DataFrame."""
+    if df is None: return
     print("🚀 Iniciando a população da tabela de partidos...")
-    all_parties = pd.DataFrame()
-    for df in tqdm(df_generator, desc="Lendo arquivos de dados"):
-        all_parties = pd.concat([all_parties, df[['NR_PARTIDO', 'SG_PARTIDO', 'NM_PARTIDO']]])
-
-    parties_df = all_parties.drop_duplicates(subset=['NR_PARTIDO'])
+    parties_df = df[['NR_PARTIDO', 'SG_PARTIDO', 'NM_PARTIDO']].drop_duplicates(subset=['NR_PARTIDO'])
 
     db = get_db_session()
     try:
@@ -106,16 +103,11 @@ def seed_parties(df_generator):
     finally:
         db.close()
 
-def seed_politicians(df_generator):
-    """Popula a tabela de políticos a partir de um gerador de DataFrames."""
-    if df_generator is None: return
+def seed_politicians(df):
+    """Popula a tabela de políticos a partir de um DataFrame."""
+    if df is None: return
     print("🚀 Iniciando a população da tabela de políticos...")
-
-    all_politicians = pd.DataFrame()
-    for df in tqdm(df_generator, desc="Lendo arquivos de dados"):
-        all_politicians = pd.concat([all_politicians, df[['NM_CANDIDATO', 'NM_URNA_CANDIDATO']]])
-
-    politicians_df = all_politicians.drop_duplicates()
+    politicians_df = df[['NM_CANDIDATO', 'NM_URNA_CANDIDATO']].drop_duplicates()
     db = get_db_session()
     try:
         politicians_to_insert = [{"id": uuid.uuid4(), "name": row["NM_CANDIDATO"], "nick": row["NM_URNA_CANDIDATO"]} for _, row in politicians_df.iterrows()]
@@ -133,16 +125,12 @@ def seed_politicians(df_generator):
     finally:
         db.close()
 
-def seed_coalitions(df_generator, year):
+def seed_coalitions(df, year):
     """Popula as tabelas de coligações e suas associações com partidos."""
-    if df_generator is None: return
+    if df is None: return
     print("🚀 Iniciando a população da tabela de coligações...")
 
-    all_coalitions = pd.DataFrame()
-    for df in tqdm(df_generator, desc="Lendo arquivos de dados"):
-        all_coalitions = pd.concat([all_coalitions, df[df['TP_AGREMIACAO'] == 'COLIGAÇÃO']])
-
-    coalitions_df = all_coalitions[['NM_COLIGACAO', 'DS_COMPOSICAO_COLIGACAO', 'NR_TURNO', 'DS_ELEICAO']].drop_duplicates()
+    coalitions_df = df[df['TP_AGREMIACAO'] == 'COLIGAÇÃO'][['NM_COLIGACAO', 'DS_COMPOSICAO_COLIGACAO', 'NR_TURNO', 'DS_ELEICAO']].drop_duplicates()
 
     db = get_db_session()
     try:
@@ -184,9 +172,9 @@ def seed_coalitions(df_generator, year):
     finally:
         db.close()
 
-def seed_candidacies(df_generator, year):
+def seed_candidacies(df, year):
     """Popula as tabelas de eleições e candidaturas."""
-    if df_generator is None: return
+    if df is None: return
     print("🚀 Iniciando a população de eleições e candidaturas...")
 
     db = get_db_session()
@@ -195,13 +183,7 @@ def seed_candidacies(df_generator, year):
         parties_cache = {row.party_number: row.party_id for row in db.execute(text("SELECT party_id, party_number FROM parties")).all()}
         politicians_cache = {f'{p.full_name}-{p.nickname}': p.politician_id for p in db.execute(text("SELECT politician_id, full_name, nickname FROM politicians")).all()}
 
-        # Cria as eleições primeiro
-        elections_df_list = []
-        for df in df_generator:
-            elections_df_list.append(df[['ANO_ELEICAO', 'NR_TURNO', 'DS_ELEICAO']])
-
-        elections_df = pd.concat(elections_df_list).drop_duplicates()
-
+        elections_df = df[['ANO_ELEICAO', 'NR_TURNO', 'DS_ELEICAO']].drop_duplicates()
         for _, row in tqdm(elections_df.iterrows(), total=len(elections_df), desc="Criando Eleições"):
             turn = int(row['NR_TURNO'])
             day = 2 if turn == 1 else 30
@@ -211,33 +193,31 @@ def seed_candidacies(df_generator, year):
         db.commit()
         elections_cache = {f"{int(e.date_part)}-{e.turn}-{e.election_type}": e.election_id for e in db.execute(text("SELECT election_id, date_part('year', election_date) as date_part, turn, election_type FROM elections")).all()}
 
-        print(f"Iniciando processamento de candidaturas...")
-        for df in get_tse_data_generator(year, TSE_CAND_BASE_URL, "consulta_cand"):
-            candidacies_to_insert = []
-            for _, row in df.iterrows():
-                election_key = f"{row['ANO_ELEICAO']}-{row['NR_TURNO']}-{row['DS_ELEICAO']}"
-                politician_key = f'{row["NM_CANDIDATO"]}-{row["NM_URNA_CANDIDATO"]}'
+        candidacies_to_insert = []
+        for _, row in df.iterrows():
+            election_key = f"{row['ANO_ELEICAO']}-{row['NR_TURNO']}-{row['DS_ELEICAO']}"
+            politician_key = f'{row["NM_CANDIDATO"]}-{row["NM_URNA_CANDIDATO"]}'
 
-                election_id = elections_cache.get(election_key)
-                politician_id = politicians_cache.get(politician_key)
-                party_id = parties_cache.get(int(row["NR_PARTIDO"]))
+            election_id = elections_cache.get(election_key)
+            politician_id = politicians_cache.get(politician_key)
+            party_id = parties_cache.get(int(row["NR_PARTIDO"]))
 
-                if party_id and election_id and politician_id:
-                    candidacies_to_insert.append({
-                        "p_id": politician_id, "party_id": party_id, "e_id": election_id,
-                        "office": row["DS_CARGO"], "num": int(row["NR_CANDIDATO"]),
-                        "sq_tse": str(row["SQ_CANDIDATO"])
-                    })
+            if party_id and election_id and politician_id:
+                candidacies_to_insert.append({
+                    "p_id": politician_id, "party_id": party_id, "e_id": election_id,
+                    "office": row["DS_CARGO"], "num": int(row["NR_CANDIDATO"]),
+                    "sq_tse": str(row["SQ_CANDIDATO"])
+                })
 
-            with tqdm(total=len(candidacies_to_insert), desc="Inserindo Candidaturas") as pbar:
-                for i in range(0, len(candidacies_to_insert), BATCH_SIZE):
-                    batch = candidacies_to_insert[i:i + BATCH_SIZE]
-                    db.execute(
-                        text("INSERT INTO candidacies (politician_id, party_id, election_id, office, electoral_number, sq_candidate_tse) VALUES (:p_id, :party_id, :e_id, :office, :num, :sq_tse) ON CONFLICT DO NOTHING"),
-                        batch
-                    )
-                    db.commit()
-                    pbar.update(len(batch))
+        with tqdm(total=len(candidacies_to_insert), desc="Inserindo Candidaturas") as pbar:
+            for i in range(0, len(candidacies_to_insert), BATCH_SIZE):
+                batch = candidacies_to_insert[i:i + BATCH_SIZE]
+                db.execute(
+                    text("INSERT INTO candidacies (politician_id, party_id, election_id, office, electoral_number, sq_candidate_tse) VALUES (:p_id, :party_id, :e_id, :office, :num, :sq_tse) ON CONFLICT DO NOTHING"),
+                    batch
+                )
+                db.commit()
+                pbar.update(len(batch))
 
         print(f"✅ Concluído! Processamento de candidaturas finalizado.")
     except Exception as e:
@@ -286,6 +266,27 @@ def update_results(df_generator):
     finally:
         db.close()
 
+def seed_all(year, force_download):
+    """Executa todos os passos de seeding em sequência, lendo o arquivo uma única vez."""
+    print(f"--- INICIANDO PROCESSO DE SEEDING COMPLETO PARA O ANO {year} ---")
+    df_generator = get_tse_data_generator(year, TSE_CAND_BASE_URL, "consulta_cand", force_download)
+
+    df_list = list(df_generator)
+    if not df_list:
+        print("Nenhum dado encontrado para processar.")
+        return
+    df = pd.concat(df_list, ignore_index=True)
+
+    seed_parties(df.copy())
+    seed_politicians(df.copy())
+    seed_candidacies(df.copy(), year)
+    seed_coalitions(df.copy(), year)
+
+    df_results_generator = get_tse_data_generator(year, TSE_VOTES_BASE_URL, "votacao_candidato_munzona", force_download)
+    update_results(df_results_generator)
+
+    print("\n--- PROCESSO DE SEEDING COMPLETO FINALIZADO ---")
+
 def main():
     """Função principal para analisar os argumentos e chamar a tarefa correta."""
     parser = argparse.ArgumentParser(description="Script de ETL para popular o banco de dados do PoliticaMente.")
@@ -295,17 +296,20 @@ def main():
     base_parser.add_argument("--year", type=int, default=date.today().year, help="Ano da eleição.")
     base_parser.add_argument("--force-download", action='store_true')
 
+    parser_all = subparsers.add_parser("seed_all", help="Executa todos os seeds em ordem.", parents=[base_parser])
+    parser_all.set_defaults(func=lambda args: seed_all(args.year, args.force_download))
+
     parser_parties = subparsers.add_parser("seed_parties", help="Popula a tabela de partidos.", parents=[base_parser])
-    parser_parties.set_defaults(func=lambda args: seed_parties(get_tse_data_generator(args.year, TSE_CAND_BASE_URL, "consulta_cand", args.force_download)))
+    parser_parties.set_defaults(func=lambda args: seed_parties(pd.concat(list(get_tse_data_generator(args.year, TSE_CAND_BASE_URL, "consulta_cand", args.force_download)))))
 
     parser_politicians = subparsers.add_parser("seed_politicians", help="Popula a tabela de políticos.", parents=[base_parser])
-    parser_politicians.set_defaults(func=lambda args: seed_politicians(get_tse_data_generator(args.year, TSE_CAND_BASE_URL, "consulta_cand", args.force_download)))
+    parser_politicians.set_defaults(func=lambda args: seed_politicians(pd.concat(list(get_tse_data_generator(args.year, TSE_CAND_BASE_URL, "consulta_cand", args.force_download)))))
 
     parser_coalitions = subparsers.add_parser("seed_coalitions", help="Popula a tabela de coligações.", parents=[base_parser])
-    parser_coalitions.set_defaults(func=lambda args: seed_coalitions(get_tse_data_generator(args.year, TSE_CAND_BASE_URL, "consulta_cand", args.force_download), args.year))
+    parser_coalitions.set_defaults(func=lambda args: seed_coalitions(pd.concat(list(get_tse_data_generator(args.year, TSE_CAND_BASE_URL, "consulta_cand", args.force_download))), args.year))
 
     parser_candidacies = subparsers.add_parser("seed_candidacies", help="Popula a tabela de candidaturas.", parents=[base_parser])
-    parser_candidacies.set_defaults(func=lambda args: seed_candidacies(get_tse_data_generator(args.year, TSE_CAND_BASE_URL, "consulta_cand", args.force_download), args.year))
+    parser_candidacies.set_defaults(func=lambda args: seed_candidacies(pd.concat(list(get_tse_data_generator(args.year, TSE_CAND_BASE_URL, "consulta_cand", args.force_download))), args.year))
 
     parser_results = subparsers.add_parser("update_results", help="Atualiza os resultados de votação.", parents=[base_parser])
     parser_results.set_defaults(func=lambda args: update_results(get_tse_data_generator(args.year, TSE_VOTES_BASE_URL, "votacao_candidato_munzona", args.force_download)))
